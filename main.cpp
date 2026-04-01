@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -219,6 +220,91 @@ struct RunResult {
     double d2h_ms = 0.0;
 };
 
+struct CpuRunResult {
+    std::vector<int> indices;
+    uint32_t total_found = 0;
+    bool overflow = false;
+    double preprocessing_ms = 0.0;
+    double search_ms = 0.0;
+};
+
+CpuRunResult run_hc8_cpu(const std::vector<unsigned char>& text,
+                         const std::vector<unsigned char>& pattern,
+                         int max_results) {
+    if (max_results <= 0) {
+        throw std::runtime_error("max_results deve ser > 0.");
+    }
+    if (pattern.size() < static_cast<size_t>(Q)) {
+        throw std::runtime_error("Para hc8, o padrão precisa ter tamanho >= 8.");
+    }
+    if (text.size() < pattern.size()) {
+        throw std::runtime_error("Texto menor que o padrão.");
+    }
+
+    const int n = static_cast<int>(text.size());
+    const int m = static_cast<int>(pattern.size());
+    const int MQ1 = m - Q + 1;
+
+    std::vector<uint32_t> F(ASIZE, 0u);
+
+    const auto t0 = std::chrono::high_resolution_clock::now();
+    const uint32_t Hm = preprocessing_hc8(pattern, F);
+    const auto t1 = std::chrono::high_resolution_clock::now();
+
+    CpuRunResult out;
+    out.preprocessing_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    uint32_t total = 0;
+    bool overflow = false;
+    std::vector<int> indices;
+    indices.reserve(static_cast<size_t>(std::min(max_results, 1'000'000)));
+
+    const auto s0 = std::chrono::high_resolution_clock::now();
+
+    int pos = m - 1;
+    while (pos < n) {
+        uint32_t H = chain_hash8(text, pos);
+        uint32_t V = F[H & TABLE_MASK];
+
+        if (V) {
+            const int end_second_qgram_pos = pos - m + Q2;
+
+            while (pos >= end_second_qgram_pos) {
+                pos -= Q;
+                H = chain_hash8(text, pos);
+                if (!(V & link_hash(H))) {
+                    goto shift_cpu;
+                }
+                V = F[H & TABLE_MASK];
+            }
+
+            pos = end_second_qgram_pos - Q;
+            const int match_start = pos - END_FIRST_QGRAM;
+
+            if (H == Hm && std::memcmp(text.data() + match_start, pattern.data(), static_cast<size_t>(m)) == 0) {
+                if (indices.size() < static_cast<size_t>(max_results)) {
+                    indices.push_back(match_start);
+                } else {
+                    overflow = true;
+                }
+                ++total;
+            }
+        }
+
+        shift_cpu:
+        pos += MQ1;
+    }
+
+    const auto s1 = std::chrono::high_resolution_clock::now();
+    out.search_ms = std::chrono::duration<double, std::milli>(s1 - s0).count();
+    out.total_found = total;
+    out.overflow = overflow || (total > static_cast<uint32_t>(max_results));
+    out.indices = std::move(indices);
+    std::sort(out.indices.begin(), out.indices.end());
+
+    return out;
+}
+
 RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
                       const std::vector<unsigned char>& pattern,
                       int chunk_size,
@@ -402,6 +488,46 @@ void print_log(const std::string& tag,
     std::cout << "\n";
 }
 
+void print_cpu_log(const std::string& tag,
+                   const std::string& text_file,
+                   int pattern_len,
+                   int max_results,
+                   const CpuRunResult& result) {
+    std::cout << "\n=== " << tag << " ===\n";
+    std::cout << "text: " << text_file << "\n";
+    std::cout << "pattern_len: " << pattern_len << "\n";
+    std::cout << "max_results: " << max_results << "\n";
+    std::cout << "found_total: " << result.total_found << "\n";
+    std::cout << "returned_indices: " << result.indices.size() << "\n";
+    std::cout << "overflow: " << (result.overflow ? "true" : "false") << "\n";
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "preprocessing(ms): " << result.preprocessing_ms << "\n";
+    std::cout << "search(ms): " << result.search_ms << "\n";
+
+    const size_t preview = std::min<size_t>(10, result.indices.size());
+    std::cout << "indices_preview(" << preview << "): ";
+    for (size_t i = 0; i < preview; ++i) {
+        std::cout << result.indices[i] << (i + 1 < preview ? ", " : "");
+    }
+    std::cout << "\n";
+}
+
+void compare_and_print(const CpuRunResult& cpu, const RunResult& gpu) {
+    const bool same_total = cpu.total_found == gpu.total_found;
+    const bool same_overflow = cpu.overflow == gpu.overflow;
+    const bool same_indices = cpu.indices == gpu.indices;
+
+    std::cout << "[COMPARE] same_total: " << (same_total ? "true" : "false") << "\n";
+    std::cout << "[COMPARE] same_overflow: " << (same_overflow ? "true" : "false") << "\n";
+    std::cout << "[COMPARE] same_indices: " << (same_indices ? "true" : "false") << "\n";
+
+    const double gpu_total = gpu.h2d_ms + gpu.kernel_ms + gpu.d2h_ms;
+    if (gpu_total > 0.0) {
+        std::cout << std::fixed << std::setprecision(3);
+        std::cout << "[COMPARE] speedup(search_cpu / gpu_total): " << (cpu.search_ms / gpu_total) << "x\n";
+    }
+}
+
 std::string sanitize_filename(std::string s) {
     for (char& c : s) {
         const bool ok =
@@ -467,6 +593,41 @@ void write_run_csv(const std::string& csv_dir,
     std::cout << "CSV salvo em: " << out_path.string() << "\n";
 }
 
+void write_run_csv_cpu(const std::string& csv_dir,
+                       const std::string& tag,
+                       const std::string& text_file,
+                       int pattern_len,
+                       int max_results,
+                       const CpuRunResult& result) {
+    std::filesystem::create_directories(csv_dir);
+
+    const std::string file_name = sanitize_filename(tag) + "_" + now_compact_utc() + ".csv";
+    const std::filesystem::path out_path = std::filesystem::path(csv_dir) / file_name;
+
+    std::ofstream out(out_path, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("Falha ao criar CSV: " + out_path.string());
+    }
+
+    out << "run_tag,text_file,pattern_len,max_results,found_total,returned_indices,overflow,preprocessing_ms,search_ms,index_order,index_value\n";
+    out << std::fixed << std::setprecision(3);
+
+    if (result.indices.empty()) {
+        out << '"' << tag << "\"," << '"' << text_file << "\"," << pattern_len << ','
+            << max_results << ',' << result.total_found << ',' << result.indices.size() << ','
+            << (result.overflow ? 1 : 0) << ',' << result.preprocessing_ms << ',' << result.search_ms << ",,\n";
+    } else {
+        for (size_t i = 0; i < result.indices.size(); ++i) {
+            out << '"' << tag << "\"," << '"' << text_file << "\"," << pattern_len << ','
+                << max_results << ',' << result.total_found << ',' << result.indices.size() << ','
+                << (result.overflow ? 1 : 0) << ',' << result.preprocessing_ms << ',' << result.search_ms << ','
+                << i << ',' << result.indices[i] << '\n';
+        }
+    }
+
+    std::cout << "CSV salvo em: " << out_path.string() << "\n";
+}
+
 void run_benchmark_examples(const std::string& kernel_path,
                             int chunk_size,
                             int max_results,
@@ -484,15 +645,29 @@ void run_benchmark_examples(const std::string& kernel_path,
         {"benchmark-example:dna", "bd/dna.100MB", 16, 1'000'000},
         {"benchmark-example:english", "bd/english.100MB", 64, 20'000'000},
         {"benchmark-example:protein", "bd/proteins.100MB", 32, 5'000'000},
+
+        // Casos extras (english) para comparação CPU x GPU em mais cenários.
+        {"benchmark-example:english-extra-8", "bd/english.100MB", 8, 500'000},
+        {"benchmark-example:english-extra-16", "bd/english.100MB", 16, 2'000'000},
+        {"benchmark-example:english-extra-32", "bd/english.100MB", 32, 10'000'000},
+        {"benchmark-example:english-extra-128", "bd/english.100MB", 128, 30'000'000},
     };
 
     for (const auto& ex : examples) {
         const auto text = read_binary_file(ex.text_file);
         const auto pattern = sample_pattern_from_text(text, ex.pattern_len, ex.offset);
-        const auto result = run_hc8_gpu(text, pattern, chunk_size, max_results, kernel_path);
-        print_log(ex.tag, ex.text_file, ex.pattern_len, chunk_size, max_results, result);
+
+        const auto cpu = run_hc8_cpu(text, pattern, max_results);
+        print_cpu_log(ex.tag + ":cpu", ex.text_file, ex.pattern_len, max_results, cpu);
+
+        const auto gpu = run_hc8_gpu(text, pattern, chunk_size, max_results, kernel_path);
+        print_log(ex.tag + ":gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, gpu);
+
+        compare_and_print(cpu, gpu);
+
         if (export_csv) {
-            write_run_csv(csv_dir, ex.tag, ex.text_file, ex.pattern_len, chunk_size, max_results, result);
+            write_run_csv_cpu(csv_dir, ex.tag + "-cpu", ex.text_file, ex.pattern_len, max_results, cpu);
+            write_run_csv(csv_dir, ex.tag + "-gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, gpu);
         }
     }
 }
@@ -501,8 +676,8 @@ void usage() {
     std::cout
         << "Uso:\n"
         << "  main.exe --run-examples [--chunk-size 262144] [--max-results 1000000] [--csv-dir results-csv]\n"
-        << "  main.exe --text bd/dna.100MB --pattern ACGTACGT --chunk-size 262144 --max-results 1000000 [--csv-dir results-csv]\n"
-        << "  main.exe --text bd/english.100MB --pattern-len 64 --pattern-offset 20000000 --chunk-size 262144 --max-results 1000000 [--csv-dir results-csv]\n"
+        << "  main.exe --text bd/dna.100MB --pattern ACGTACGT --chunk-size 262144 --max-results 1000000 [--csv-dir results-csv]  (roda CPU e GPU)\n"
+        << "  main.exe --text bd/english.100MB --pattern-len 64 --pattern-offset 20000000 --chunk-size 262144 --max-results 1000000 [--csv-dir results-csv]  (roda CPU e GPU)\n"
         << "  main.exe --run-examples --no-csv\n";
 }
 
@@ -573,10 +748,17 @@ int main(int argc, char** argv) {
             pattern = sample_pattern_from_text(text, pattern_len, pattern_offset);
         }
 
-        const auto result = run_hc8_gpu(text, pattern, chunk_size, max_results, kernel_path);
-        print_log("single-run", text_file, static_cast<int>(pattern.size()), chunk_size, max_results, result);
+        const auto cpu = run_hc8_cpu(text, pattern, max_results);
+        print_cpu_log("single-run:cpu", text_file, static_cast<int>(pattern.size()), max_results, cpu);
+
+        const auto gpu = run_hc8_gpu(text, pattern, chunk_size, max_results, kernel_path);
+        print_log("single-run:gpu", text_file, static_cast<int>(pattern.size()), chunk_size, max_results, gpu);
+
+        compare_and_print(cpu, gpu);
+
         if (export_csv) {
-            write_run_csv(csv_dir, "single-run", text_file, static_cast<int>(pattern.size()), chunk_size, max_results, result);
+            write_run_csv_cpu(csv_dir, "single-run-cpu", text_file, static_cast<int>(pattern.size()), max_results, cpu);
+            write_run_csv(csv_dir, "single-run-gpu", text_file, static_cast<int>(pattern.size()), chunk_size, max_results, gpu);
         }
 
         return 0;
