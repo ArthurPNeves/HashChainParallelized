@@ -218,6 +218,7 @@ struct RunResult {
     double h2d_ms = 0.0;
     double kernel_ms = 0.0;
     double d2h_ms = 0.0;
+    double gpu_wall_ms = 0.0;
 };
 
 struct CpuRunResult {
@@ -332,6 +333,7 @@ RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
     const auto t1 = std::chrono::high_resolution_clock::now();
     const double preprocessing_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
+    const auto wall_start = std::chrono::high_resolution_clock::now();
     OclContext ocl = create_opencl(kernel_path);
 
     cl_int err = CL_SUCCESS;
@@ -426,6 +428,9 @@ RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
         clReleaseEvent(evt_r_results);
     }
 
+    const auto wall_end = std::chrono::high_resolution_clock::now();
+    out.gpu_wall_ms = std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+
     out.indices.assign(tmp_indices.begin(), tmp_indices.end());
     std::sort(out.indices.begin(), out.indices.end());
 
@@ -479,6 +484,7 @@ void print_log(const std::string& tag,
     std::cout << "kernel(ms): " << result.kernel_ms << "\n";
     std::cout << "D2H(ms): " << result.d2h_ms << "\n";
     std::cout << "GPU_total(ms): " << gpu_total << "\n";
+    std::cout << "GPU_wall(ms): " << result.gpu_wall_ms << "\n";
 
     const size_t preview = std::min<size_t>(10, result.indices.size());
     std::cout << "indices_preview(" << preview << "): ";
@@ -526,6 +532,10 @@ void compare_and_print(const CpuRunResult& cpu, const RunResult& gpu) {
         std::cout << std::fixed << std::setprecision(3);
         std::cout << "[COMPARE] speedup(search_cpu / gpu_total): " << (cpu.search_ms / gpu_total) << "x\n";
     }
+    if (gpu.gpu_wall_ms > 0.0) {
+        std::cout << std::fixed << std::setprecision(3);
+        std::cout << "[COMPARE] speedup(search_cpu / gpu_wall): " << (cpu.search_ms / gpu.gpu_wall_ms) << "x\n";
+    }
 }
 
 std::string sanitize_filename(std::string s) {
@@ -572,20 +582,22 @@ void write_run_csv(const std::string& csv_dir,
         throw std::runtime_error("Falha ao criar CSV: " + out_path.string());
     }
 
-    out << "run_tag,text_file,pattern_len,chunk_size,max_results,found_total,returned_indices,overflow,h2d_ms,kernel_ms,d2h_ms,gpu_total_ms,index_order,index_value\n";
+    out << "run_tag,text_file,pattern_len,chunk_size,max_results,found_total,returned_indices,overflow,h2d_ms,kernel_ms,d2h_ms,gpu_total_ms,gpu_wall_ms,index_order,index_value\n";
     out << std::fixed << std::setprecision(3);
 
     if (result.indices.empty()) {
         out << '"' << tag << "\"," << '"' << text_file << "\"," << pattern_len << ',' << chunk_size << ','
             << max_results << ',' << result.total_found << ',' << result.indices.size() << ','
             << (result.overflow ? 1 : 0) << ','
-            << result.h2d_ms << ',' << result.kernel_ms << ',' << result.d2h_ms << ',' << gpu_total << ",,\n";
+            << result.h2d_ms << ',' << result.kernel_ms << ',' << result.d2h_ms << ',' << gpu_total << ','
+            << result.gpu_wall_ms << ",,\n";
     } else {
         for (size_t i = 0; i < result.indices.size(); ++i) {
             out << '"' << tag << "\"," << '"' << text_file << "\"," << pattern_len << ',' << chunk_size << ','
                 << max_results << ',' << result.total_found << ',' << result.indices.size() << ','
                 << (result.overflow ? 1 : 0) << ','
                 << result.h2d_ms << ',' << result.kernel_ms << ',' << result.d2h_ms << ',' << gpu_total << ','
+                << result.gpu_wall_ms << ','
                 << i << ',' << result.indices[i] << '\n';
         }
     }
