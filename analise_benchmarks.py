@@ -66,6 +66,7 @@ def preparar_cpu_gpu(df_runs: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame,
         "kernel_ms",
         "d2h_ms",
         "gpu_total_ms",
+        "gpu_wall_ms",
         "cpu_total_ms",
         "preprocessing_ms",
         "search_ms",
@@ -95,11 +96,17 @@ def preparar_cpu_gpu(df_runs: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame,
         mask_gpu_nan = df["gpu_total_ms"].isna()
         df.loc[mask_gpu_nan, "gpu_total_ms"] = df.loc[mask_gpu_nan, gpu_parts].fillna(0).sum(axis=1)
 
+    # gpu_wall_ms é o tempo de parede honesto (introduzido na fase TCC II);
+    # CSVs antigos não têm essa coluna, então caímos para gpu_total_ms.
+    if "gpu_wall_ms" not in df.columns:
+        df["gpu_wall_ms"] = pd.NA
+    df["gpu_wall_ms"] = df["gpu_wall_ms"].fillna(df["gpu_total_ms"])
+
     run_tag = df["run_tag"].astype(str).str.lower() if "run_tag" in df.columns else pd.Series("", index=df.index)
 
     # Heurística robusta para separar CPU e GPU.
     cpu_mask = df["cpu_total_ms"].notna() | run_tag.str.contains("cpu")
-    gpu_mask = df["gpu_total_ms"].notna() | run_tag.str.contains("gpu")
+    gpu_mask = df["gpu_total_ms"].notna() | run_tag.str.contains("gpu") | df["gpu_wall_ms"].notna()
 
     cpu_raw = df[cpu_mask].copy()
     gpu_raw = df[gpu_mask].copy()
@@ -112,7 +119,7 @@ def preparar_cpu_gpu(df_runs: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame,
         .dropna(subset=["cpu_total_ms"])
     )
 
-    agg_map = {"gpu_total_ms": "mean"}
+    agg_map = {"gpu_total_ms": "mean", "gpu_wall_ms": "mean"}
     for c in ["h2d_ms", "kernel_ms", "d2h_ms"]:
         if c in gpu_raw.columns:
             agg_map[c] = "mean"
@@ -120,12 +127,14 @@ def preparar_cpu_gpu(df_runs: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame,
     gpu_agg = (
         gpu_raw.groupby(chaves, as_index=False)
         .agg(agg_map)
-        .dropna(subset=["gpu_total_ms"])
+        .dropna(subset=["gpu_wall_ms"])
     )
 
     merged = pd.merge(cpu_agg, gpu_agg, on=chaves, how="inner")
     merged["base"] = merged["text_file"].map(inferir_base)
-    merged["speedup"] = merged["cpu_total_ms"] / merged["gpu_total_ms"]
+    # Prefere o tempo de parede honesto. Se vier de CSV antigo (sem gpu_wall_ms),
+    # ele já foi preenchido com gpu_total_ms acima.
+    merged["speedup"] = merged["cpu_total_ms"] / merged["gpu_wall_ms"]
 
     merged = merged.sort_values(["base", "pattern_len"]).reset_index(drop=True)
     return cpu_agg, gpu_agg, merged
@@ -243,6 +252,7 @@ def imprimir_tabela_markdown(df: pd.DataFrame) -> None:
         "text_file",
         "pattern_len",
         "cpu_total_ms",
+        "gpu_wall_ms",
         "gpu_total_ms",
         "speedup",
     ]
@@ -257,7 +267,8 @@ def imprimir_tabela_markdown(df: pd.DataFrame) -> None:
         "text_file": "Arquivo",
         "pattern_len": "m",
         "cpu_total_ms": "CPU médio (ms)",
-        "gpu_total_ms": "GPU médio (ms)",
+        "gpu_wall_ms": "GPU parede (ms)",
+        "gpu_total_ms": "GPU eventos (ms)",
         "speedup": "Speedup",
         "h2d_ms": "H2D (ms)",
         "kernel_ms": "Kernel (ms)",
