@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -211,6 +212,48 @@ OclContext create_opencl(const std::string& kernel_path) {
     return ocl;
 }
 
+struct PinnedTextUpload {
+    cl_mem device_buf = nullptr;
+    double h2d_ms = 0.0;
+};
+
+PinnedTextUpload upload_text_pinned(OclContext& ocl, const std::vector<unsigned char>& text) {
+    const size_t bytes = text.size() * sizeof(unsigned char);
+    cl_int err = CL_SUCCESS;
+
+    cl_mem staging_buf = clCreateBuffer(ocl.context, CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR, bytes, nullptr, &err);
+    check_cl(err, "clCreateBuffer(text-pinned-staging)");
+
+    void* host_ptr = clEnqueueMapBuffer(ocl.queue, staging_buf, CL_TRUE,
+                                        CL_MAP_WRITE_INVALIDATE_REGION,
+                                        0, bytes, 0, nullptr, nullptr, &err);
+    check_cl(err, "clEnqueueMapBuffer(text-pinned-staging)");
+
+    std::memcpy(host_ptr, text.data(), bytes);
+
+    cl_event evt_unmap = nullptr;
+    check_cl(clEnqueueUnmapMemObject(ocl.queue, staging_buf, host_ptr, 0, nullptr, &evt_unmap),
+             "clEnqueueUnmapMemObject(text-pinned-staging)");
+
+    cl_mem device_buf = clCreateBuffer(ocl.context, CL_MEM_READ_ONLY, bytes, nullptr, &err);
+    check_cl(err, "clCreateBuffer(text-device)");
+
+    cl_event evt_copy = nullptr;
+    const cl_event copy_wait[] = {evt_unmap};
+    check_cl(clEnqueueCopyBuffer(ocl.queue, staging_buf, device_buf, 0, 0, bytes, 1, copy_wait, &evt_copy),
+             "clEnqueueCopyBuffer(staging->device)");
+    check_cl(clWaitForEvents(1, &evt_copy), "clWaitForEvents(text-pinned-copy)");
+
+    PinnedTextUpload r;
+    r.device_buf = device_buf;
+    r.h2d_ms = event_millis(evt_unmap) + event_millis(evt_copy);
+
+    clReleaseEvent(evt_unmap);
+    clReleaseEvent(evt_copy);
+    clReleaseMemObject(staging_buf);
+    return r;
+}
+
 struct RunResult {
     std::vector<int> indices;
     uint32_t total_found = 0;
@@ -306,11 +349,12 @@ CpuRunResult run_hc8_cpu(const std::vector<unsigned char>& text,
     return out;
 }
 
-RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
-                      const std::vector<unsigned char>& pattern,
-                      int chunk_size,
-                      int max_results,
-                      const std::string& kernel_path) {
+RunResult run_hc8_gpu_inner(OclContext& ocl,
+                            cl_mem text_buf,
+                            int n,
+                            const std::vector<unsigned char>& pattern,
+                            int chunk_size,
+                            int max_results) {
     if (chunk_size <= 0) {
         throw std::runtime_error("chunk_size deve ser > 0.");
     }
@@ -320,11 +364,10 @@ RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
     if (pattern.size() < static_cast<size_t>(Q)) {
         throw std::runtime_error("Para hc8, o padrão precisa ter tamanho >= 8.");
     }
-    if (text.size() < pattern.size()) {
+    if (n < static_cast<int>(pattern.size())) {
         throw std::runtime_error("Texto menor que o padrão.");
     }
 
-    const int n = static_cast<int>(text.size());
     const int m = static_cast<int>(pattern.size());
 
     std::vector<uint32_t> F(ASIZE, 0u);
@@ -334,12 +377,8 @@ RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
     const double preprocessing_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     const auto wall_start = std::chrono::high_resolution_clock::now();
-    OclContext ocl = create_opencl(kernel_path);
 
     cl_int err = CL_SUCCESS;
-    cl_mem text_buf = clCreateBuffer(ocl.context, CL_MEM_READ_ONLY, text.size() * sizeof(unsigned char), nullptr, &err);
-    check_cl(err, "clCreateBuffer(text)");
-
     cl_mem pattern_buf = clCreateBuffer(ocl.context, CL_MEM_READ_ONLY, pattern.size() * sizeof(unsigned char), nullptr, &err);
     check_cl(err, "clCreateBuffer(pattern)");
 
@@ -356,21 +395,19 @@ RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
     check_cl(err, "clCreateBuffer(overflow)");
 
     cl_uint zero = 0;
-    cl_event evt_w_text = nullptr, evt_w_pattern = nullptr, evt_w_F = nullptr, evt_w_count = nullptr, evt_w_over = nullptr;
+    cl_event evt_w_pattern = nullptr, evt_w_F = nullptr, evt_w_count = nullptr, evt_w_over = nullptr;
 
-    check_cl(clEnqueueWriteBuffer(ocl.queue, text_buf, CL_FALSE, 0, text.size() * sizeof(unsigned char), text.data(), 0, nullptr, &evt_w_text), "clEnqueueWriteBuffer(text)");
     check_cl(clEnqueueWriteBuffer(ocl.queue, pattern_buf, CL_FALSE, 0, pattern.size() * sizeof(unsigned char), pattern.data(), 0, nullptr, &evt_w_pattern), "clEnqueueWriteBuffer(pattern)");
     check_cl(clEnqueueWriteBuffer(ocl.queue, F_buf, CL_FALSE, 0, F.size() * sizeof(uint32_t), F.data(), 0, nullptr, &evt_w_F), "clEnqueueWriteBuffer(F)");
     check_cl(clEnqueueWriteBuffer(ocl.queue, count_buf, CL_FALSE, 0, sizeof(cl_uint), &zero, 0, nullptr, &evt_w_count), "clEnqueueWriteBuffer(count=0)");
     check_cl(clEnqueueWriteBuffer(ocl.queue, overflow_buf, CL_FALSE, 0, sizeof(cl_uint), &zero, 0, nullptr, &evt_w_over), "clEnqueueWriteBuffer(overflow=0)");
 
-    const cl_event h2d_wait_list[] = {evt_w_text, evt_w_pattern, evt_w_F, evt_w_count, evt_w_over};
-    check_cl(clWaitForEvents(5, h2d_wait_list), "clWaitForEvents(H2D)");
+    const cl_event h2d_wait_list[] = {evt_w_pattern, evt_w_F, evt_w_count, evt_w_over};
+    check_cl(clWaitForEvents(4, h2d_wait_list), "clWaitForEvents(H2D)");
 
     RunResult out;
-    out.h2d_ms = event_millis(evt_w_text) + event_millis(evt_w_pattern) + event_millis(evt_w_F) + event_millis(evt_w_count) + event_millis(evt_w_over);
+    out.h2d_ms = event_millis(evt_w_pattern) + event_millis(evt_w_F) + event_millis(evt_w_count) + event_millis(evt_w_over);
 
-    clReleaseEvent(evt_w_text);
     clReleaseEvent(evt_w_pattern);
     clReleaseEvent(evt_w_F);
     clReleaseEvent(evt_w_count);
@@ -434,7 +471,6 @@ RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
     out.indices.assign(tmp_indices.begin(), tmp_indices.end());
     std::sort(out.indices.begin(), out.indices.end());
 
-    clReleaseMemObject(text_buf);
     clReleaseMemObject(pattern_buf);
     clReleaseMemObject(F_buf);
     clReleaseMemObject(results_buf);
@@ -443,6 +479,29 @@ RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
 
     std::cout << "[CPU] preprocessing(ms): " << std::fixed << std::setprecision(3) << preprocessing_ms << "\n";
 
+    return out;
+}
+
+RunResult run_hc8_gpu(const std::vector<unsigned char>& text,
+                      const std::vector<unsigned char>& pattern,
+                      int chunk_size,
+                      int max_results,
+                      const std::string& kernel_path) {
+    const auto wall_setup_start = std::chrono::high_resolution_clock::now();
+    OclContext ocl = create_opencl(kernel_path);
+
+    PinnedTextUpload up = upload_text_pinned(ocl, text);
+    cl_mem text_buf = up.device_buf;
+    const double text_h2d_ms = up.h2d_ms;
+
+    const auto wall_setup_end = std::chrono::high_resolution_clock::now();
+    const double setup_wall_ms = std::chrono::duration<double, std::milli>(wall_setup_end - wall_setup_start).count();
+
+    RunResult out = run_hc8_gpu_inner(ocl, text_buf, static_cast<int>(text.size()), pattern, chunk_size, max_results);
+    out.h2d_ms += text_h2d_ms;
+    out.gpu_wall_ms += setup_wall_ms;
+
+    clReleaseMemObject(text_buf);
     return out;
 }
 
@@ -652,36 +711,97 @@ void run_benchmark_examples(const std::string& kernel_path,
         int offset;
     };
 
-    // Exemplos baseados no conjunto SEA2024: pizza-dna, pizza-english, pizza-protein (100MB)
+    // Exemplos baseados no conjunto SEA2024: pizza-dna, pizza-english, pizza-protein (100MB).
+    // As 3 primeiras entradas (uma por base) pagam o cold-upload do texto;
+    // as demais reusam a mesma base já no device (warm cache).
     const std::vector<Example> examples = {
         {"benchmark-example:dna", "bd/dna.100MB", 16, 1'000'000},
         {"benchmark-example:english", "bd/english.100MB", 64, 20'000'000},
         {"benchmark-example:protein", "bd/proteins.100MB", 32, 5'000'000},
 
-        // Casos extras (english) para comparação CPU x GPU em mais cenários.
+        // Sweep de m para DNA (warm-cache).
+        {"benchmark-example:dna-extra-8", "bd/dna.100MB", 8, 1'500'000},
+        {"benchmark-example:dna-extra-32", "bd/dna.100MB", 32, 2'000'000},
+        {"benchmark-example:dna-extra-64", "bd/dna.100MB", 64, 3'000'000},
+        {"benchmark-example:dna-extra-128", "bd/dna.100MB", 128, 4'000'000},
+
+        // Sweep de m para English (warm-cache).
         {"benchmark-example:english-extra-8", "bd/english.100MB", 8, 500'000},
         {"benchmark-example:english-extra-16", "bd/english.100MB", 16, 2'000'000},
         {"benchmark-example:english-extra-32", "bd/english.100MB", 32, 10'000'000},
         {"benchmark-example:english-extra-128", "bd/english.100MB", 128, 30'000'000},
+
+        // Sweep de m para Proteins (warm-cache).
+        {"benchmark-example:protein-extra-8", "bd/proteins.100MB", 8, 1'000'000},
+        {"benchmark-example:protein-extra-16", "bd/proteins.100MB", 16, 3'000'000},
+        {"benchmark-example:protein-extra-64", "bd/proteins.100MB", 64, 6'000'000},
+        {"benchmark-example:protein-extra-128", "bd/proteins.100MB", 128, 8'000'000},
     };
 
-    for (const auto& ex : examples) {
-        const auto text = read_binary_file(ex.text_file);
-        const auto pattern = sample_pattern_from_text(text, ex.pattern_len, ex.offset);
+    const auto setup_t0 = std::chrono::high_resolution_clock::now();
+    OclContext ocl = create_opencl(kernel_path);
+    const auto setup_t1 = std::chrono::high_resolution_clock::now();
+    const double setup_ms = std::chrono::duration<double, std::milli>(setup_t1 - setup_t0).count();
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "[SETUP] OpenCL context+kernel build (uma vez): " << setup_ms << " ms\n";
 
-        const auto cpu = run_hc8_cpu(text, pattern, max_results);
-        print_cpu_log(ex.tag + ":cpu", ex.text_file, ex.pattern_len, max_results, cpu);
+    struct CachedText {
+        std::vector<unsigned char> data;
+        cl_mem buf = nullptr;
+    };
+    std::map<std::string, CachedText> text_cache;
 
-        const auto gpu = run_hc8_gpu(text, pattern, chunk_size, max_results, kernel_path);
-        print_log(ex.tag + ":gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, gpu);
-
-        compare_and_print(cpu, gpu);
-
-        if (export_csv) {
-            write_run_csv_cpu(csv_dir, ex.tag + "-cpu", ex.text_file, ex.pattern_len, max_results, cpu);
-            write_run_csv(csv_dir, ex.tag + "-gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, gpu);
+    auto release_cache = [&]() {
+        for (auto& kv : text_cache) {
+            if (kv.second.buf) clReleaseMemObject(kv.second.buf);
+            kv.second.buf = nullptr;
         }
+    };
+
+    try {
+        for (const auto& ex : examples) {
+            double text_h2d_ms = 0.0;
+            double text_wall_ms = 0.0;
+
+            auto cache_it = text_cache.find(ex.text_file);
+            if (cache_it == text_cache.end()) {
+                const auto t0 = std::chrono::high_resolution_clock::now();
+                CachedText c;
+                c.data = read_binary_file(ex.text_file);
+                PinnedTextUpload up = upload_text_pinned(ocl, c.data);
+                c.buf = up.device_buf;
+                text_h2d_ms = up.h2d_ms;
+                const auto t1 = std::chrono::high_resolution_clock::now();
+                text_wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                cache_it = text_cache.emplace(ex.text_file, std::move(c)).first;
+            }
+
+            const std::vector<unsigned char>& text_ref = cache_it->second.data;
+            const cl_mem text_buf = cache_it->second.buf;
+
+            const auto pattern = sample_pattern_from_text(text_ref, ex.pattern_len, ex.offset);
+
+            const auto cpu = run_hc8_cpu(text_ref, pattern, max_results);
+            print_cpu_log(ex.tag + ":cpu", ex.text_file, ex.pattern_len, max_results, cpu);
+
+            RunResult gpu = run_hc8_gpu_inner(ocl, text_buf, static_cast<int>(text_ref.size()), pattern, chunk_size, max_results);
+            gpu.h2d_ms += text_h2d_ms;
+            gpu.gpu_wall_ms += text_wall_ms;
+
+            print_log(ex.tag + ":gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, gpu);
+            compare_and_print(cpu, gpu);
+
+            if (export_csv) {
+                write_run_csv_cpu(csv_dir, ex.tag + "-cpu", ex.text_file, ex.pattern_len, max_results, cpu);
+                write_run_csv(csv_dir, ex.tag + "-gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, gpu);
+            }
+        }
+    } catch (...) {
+        release_cache();
+        throw;
     }
+
+    release_cache();
 }
 
 void usage() {

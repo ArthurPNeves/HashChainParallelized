@@ -1,0 +1,2 @@
+run_tag,text_file,pattern_len,max_results,found_total,returned_indices,overflow,preprocessing_ms,search_ms,index_order,index_value
+"benchmark-example:protein-extra-16-cpu","bd/proteins.100MB",16,1000000,1,1,0,0.001,23.272,0,3000000

@@ -1,0 +1,2 @@
+run_tag,text_file,pattern_len,chunk_size,max_results,found_total,returned_indices,overflow,h2d_ms,kernel_ms,d2h_ms,gpu_total_ms,gpu_wall_ms,index_order,index_value
+"benchmark-example:dna-extra-128-gpu","bd/dna.100MB",128,262144,1000000,1,1,0,0.000,1.260,0.013,1.273,1.796,0,4000000
