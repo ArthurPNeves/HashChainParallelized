@@ -1,0 +1,4 @@
+run_tag,text_file,pattern_len,max_results,found_total,returned_indices,overflow,preprocessing_ms,search_ms,index_order,index_value
+"benchmark-example:dna-cpu","bd/dna.100MB",16,1000000,3,3,0,0.000,23.322,0,1000000
+"benchmark-example:dna-cpu","bd/dna.100MB",16,1000000,3,3,0,0.000,23.322,1,59337108
+"benchmark-example:dna-cpu","bd/dna.100MB",16,1000000,3,3,0,0.000,23.322,2,69664436

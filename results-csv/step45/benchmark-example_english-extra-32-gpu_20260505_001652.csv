@@ -1,0 +1,2 @@
+run_tag,text_file,pattern_len,chunk_size,max_results,found_total,returned_indices,overflow,h2d_ms,kernel_ms,d2h_ms,gpu_total_ms,gpu_wall_ms,index_order,index_value
+"benchmark-example:english-extra-32-gpu","bd/english.100MB",32,262144,1000000,1,1,0,0.000,4.394,0.012,4.406,5.094,0,10000000
