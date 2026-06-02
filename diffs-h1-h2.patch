@@ -1,0 +1,279 @@
+diff --git a/analise_benchmarks.py b/analise_benchmarks.py
+index efdcbe4..3f992d1 100644
+--- a/analise_benchmarks.py
++++ b/analise_benchmarks.py
+@@ -245,18 +245,34 @@ def imprimir_tabela(df: pd.DataFrame) -> None:
+     def linha(vals):
+         return "| " + " | ".join(str(v) for v in vals) + " |"
+ 
++    # H2 (§4.3): vazão (Throughput) = bytes do texto / tempo. GB com GB = 1e9 bytes.
++    tem_vazao = "text_bytes" in df.columns
++
++    def vazao_gbs(text_bytes: float, ms: float) -> float:
++        if text_bytes and text_bytes > 0 and ms and ms > 0:
++            return float(text_bytes) / float(ms) / 1e6  # bytes / ms / 1e6 == bytes/(s)/1e9
++        return float("nan")
++
+     print("\n## Tabela — regime WARM (mediana ± CV%)\n")
+     hdr = ["Base", "m", "CPU search (ms)", "GPU wall (ms)", "Speedup"]
++    if tem_vazao:
++        hdr += ["Vazão CPU (GB/s)", "Vazão GPU (GB/s)"]
+     print(linha(hdr))
+     print(linha(["---"] * len(hdr)))
+     warm = df[df["regime"] == "warm"].sort_values(["base", "pattern_len"])
+     for _, r in warm.iterrows():
+-        print(linha([
++        cols = [
+             r["base"], int(r["pattern_len"]),
+             f"{r['cpu_search_ms_median']:.2f} ± {r['cpu_search_ms_cv']:.1f}%",
+             f"{r['gpu_query_wall_ms_median']:.2f} ± {r['gpu_query_wall_ms_cv']:.1f}%",
+             f"{r['speedup']:.2f}×",
+-        ]))
++        ]
++        if tem_vazao:
++            cols += [
++                f"{vazao_gbs(r['text_bytes'], r['cpu_search_ms_median']):.2f}",
++                f"{vazao_gbs(r['text_bytes'], r['gpu_query_wall_ms_median']):.2f}",
++            ]
++        print(linha(cols))
+ 
+     print("\n## Tabela — regime COLD (leitura cobrada de ambos os lados)\n")
+     hdr = ["Base", "m", "leitura (ms)", "upload (ms)", "CPU total (ms)", "GPU total (ms)", "Speedup"]
+@@ -272,6 +288,26 @@ def imprimir_tabela(df: pd.DataFrame) -> None:
+             f"{r['speedup']:.2f}×",
+         ]))
+ 
++    # H2 (§4.3): taxa de colisões do filtro F (falsos positivos) — "verificações desnecessárias".
++    if "filter_candidates" in df.columns:
++        print("\n## Tabela — colisões do filtro $F$ (regime warm)\n")
++        hdr = ["Base", "m", "candidatos", "ocorrências", "FP filtro (%)", "FP memcmp (%)", "candidatos/KiB"]
++        print(linha(hdr))
++        print(linha(["---"] * len(hdr)))
++        for _, r in warm.iterrows():
++            cand = float(r["filter_candidates"])
++            mtc = float(r["matches"]) if "matches" in df.columns else float(r.get("found_total", 0))
++            memc = float(r["memcmp_calls"]) if "memcmp_calls" in df.columns else float("nan")
++            fp_filtro = (cand - mtc) / max(cand, 1.0) * 100.0
++            fp_memcmp = (memc - mtc) / max(memc, 1.0) * 100.0 if np.isfinite(memc) else float("nan")
++            tb = float(r["text_bytes"]) if "text_bytes" in df.columns else float("nan")
++            cand_kib = cand / (tb / 1024.0) if np.isfinite(tb) and tb > 0 else float("nan")
++            print(linha([
++                r["base"], int(r["pattern_len"]),
++                f"{int(cand)}", f"{int(mtc)}",
++                f"{fp_filtro:.2f}", f"{fp_memcmp:.2f}", f"{cand_kib:.3f}",
++            ]))
++
+ 
+ def main() -> None:
+     parser = argparse.ArgumentParser(
+diff --git a/main.cpp b/main.cpp
+index a11cd34..ef72a74 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -239,6 +239,27 @@ OclContext create_opencl(const std::string& kernel_path) {
+     return ocl;
+ }
+ 
++// H1 (§4.1): imprime os parâmetros do device OpenCL para preencher a tabela de ambiente.
++// A linha "[DEVICE] ..." fica no stdout.txt; os dados do host (CPU/RAM/disco) vêm do ambiente.txt.
++void print_device_info(const OclContext& ocl) {
++    auto str_info = [&](cl_device_info p) {
++        size_t sz = 0; clGetDeviceInfo(ocl.device, p, 0, nullptr, &sz);
++        std::string s(sz, '\0'); clGetDeviceInfo(ocl.device, p, sz, s.data(), nullptr);
++        if (!s.empty() && s.back() == '\0') s.pop_back();
++        return s;
++    };
++    cl_uint cu = 0;    clGetDeviceInfo(ocl.device, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cu), &cu, nullptr);
++    cl_ulong gmem = 0; clGetDeviceInfo(ocl.device, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(gmem), &gmem, nullptr);
++    size_t wg = 0;     clGetDeviceInfo(ocl.device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(wg), &wg, nullptr);
++    std::cout << "[DEVICE] name=" << str_info(CL_DEVICE_NAME)
++              << " | vendor=" << str_info(CL_DEVICE_VENDOR)
++              << " | driver=" << str_info(CL_DRIVER_VERSION)
++              << " | cl_version=" << str_info(CL_DEVICE_VERSION)
++              << " | compute_units=" << cu
++              << " | global_mem_MiB=" << (gmem / (1024 * 1024))
++              << " | max_workgroup=" << wg << "\n";
++}
++
+ struct PinnedTextUpload {
+     cl_mem device_buf = nullptr;
+     double h2d_ms = 0.0;
+@@ -376,6 +397,56 @@ CpuRunResult run_hc8_cpu(const std::vector<unsigned char>& text,
+     return out;
+ }
+ 
++// H2 (§4.3): taxa de colisões do filtro F (falsos positivos). É uma propriedade ALGORÍTMICA
++// (idêntica em CPU e GPU), então conta-se 1x na CPU, FORA do laço cronometrado (não perturba o tempo).
++// A estrutura espelha fielmente o laço de run_hc8_cpu (mesmo goto, mesmos saltos de cadeia).
++struct CollisionStats {
++    uint64_t probes = 0;               // posições onde o filtro foi consultado
++    uint64_t filter_candidates = 0;    // F[H&MASK] != 0 (passou o filtro barato)
++    uint64_t chain_verifications = 0;  // cadeia completa validada (chegou ao memcmp)
++    uint64_t memcmp_calls = 0;         // H == Hm -> memcmp de fato executado
++    uint64_t matches = 0;              // casamentos confirmados
++};
++
++CollisionStats count_filter_collisions(const std::vector<unsigned char>& text,
++                                       const std::vector<unsigned char>& pattern) {
++    CollisionStats cs;
++    const int n = static_cast<int>(text.size());
++    const int m = static_cast<int>(pattern.size());
++    const int MQ1 = m - Q + 1;
++    std::vector<uint32_t> F(ASIZE, 0u);
++    const uint32_t Hm = preprocessing_hc8(pattern, F);
++
++    int pos = m - 1;
++    while (pos < n) {
++        ++cs.probes;
++        uint32_t H = chain_hash8(text, pos);
++        uint32_t V = F[H & TABLE_MASK];
++        if (V) {
++            ++cs.filter_candidates;
++            const int end_second_qgram_pos = pos - m + Q2;
++            while (pos >= end_second_qgram_pos) {
++                pos -= Q;
++                H = chain_hash8(text, pos);
++                if (!(V & link_hash(H))) goto shift_cc;
++                V = F[H & TABLE_MASK];
++            }
++            pos = end_second_qgram_pos - Q;
++            const int match_start = pos - END_FIRST_QGRAM;
++            ++cs.chain_verifications;
++            if (H == Hm) {
++                ++cs.memcmp_calls;
++                if (std::memcmp(text.data() + match_start, pattern.data(), static_cast<size_t>(m)) == 0) {
++                    ++cs.matches;
++                }
++            }
++        }
++        shift_cc:
++        pos += MQ1;
++    }
++    return cs;
++}
++
+ RunResult run_hc8_gpu_inner(OclContext& ocl,
+                             cl_mem text_buf,
+                             int n,
+@@ -749,6 +820,13 @@ struct TimingsRow {
+     uint32_t found_total = 0;
+     bool overflow = false;
+     bool same_indices = true;
++    // H2: vazão (a partir de text_bytes) e taxa de colisões do filtro (contagem algorítmica).
++    uint64_t text_bytes = 0;
++    uint64_t probes = 0;
++    uint64_t filter_candidates = 0;
++    uint64_t chain_verifications = 0;
++    uint64_t memcmp_calls = 0;
++    uint64_t matches = 0;
+ };
+ 
+ void write_timings_csv(const std::string& csv_dir, const std::vector<TimingsRow>& rows) {
+@@ -765,7 +843,8 @@ void write_timings_csv(const std::string& csv_dir, const std::vector<TimingsRow>
+            "cpu_search_ms_median,cpu_search_ms_cv,cpu_preproc_ms,"
+            "file_read_ms,gpu_upload_ms_median,gpu_upload_ms_cv,"
+            "h2d_ms,kernel_ms_median,kernel_ms_cv,d2h_ms,gpu_query_wall_ms_median,gpu_query_wall_ms_cv,"
+-           "cpu_total_ms,gpu_total_ms,speedup,found_total,overflow,same_indices\n";
++           "cpu_total_ms,gpu_total_ms,speedup,found_total,overflow,same_indices,"
++           "text_bytes,probes,filter_candidates,chain_verifications,memcmp_calls,matches\n";
+     out << std::fixed << std::setprecision(4);
+ 
+     for (const auto& r : rows) {
+@@ -776,7 +855,9 @@ void write_timings_csv(const std::string& csv_dir, const std::vector<TimingsRow>
+             << r.h2d_ms << ',' << r.kernel.median << ',' << r.kernel.cv << ',' << r.d2h_ms << ','
+             << r.gpu_query_wall.median << ',' << r.gpu_query_wall.cv << ','
+             << r.cpu_total_ms << ',' << r.gpu_total_ms << ',' << r.speedup << ','
+-            << r.found_total << ',' << (r.overflow ? 1 : 0) << ',' << (r.same_indices ? 1 : 0) << '\n';
++            << r.found_total << ',' << (r.overflow ? 1 : 0) << ',' << (r.same_indices ? 1 : 0) << ','
++            << r.text_bytes << ',' << r.probes << ',' << r.filter_candidates << ','
++            << r.chain_verifications << ',' << r.memcmp_calls << ',' << r.matches << '\n';
+     }
+ 
+     std::cout << "CSV de timings salvo em: " << out_path.string() << "\n";
+@@ -829,6 +910,7 @@ void run_benchmark_examples(const std::string& kernel_path,
+     const double setup_ms = std::chrono::duration<double, std::milli>(setup_t1 - setup_t0).count();
+     std::cout << std::fixed << std::setprecision(3);
+     std::cout << "[SETUP] OpenCL context+kernel build (uma vez): " << setup_ms << " ms\n";
++    print_device_info(ocl);  // H1 (§4.1): registra device/driver/CUs/VRAM no stdout.txt
+ 
+     struct CachedText {
+         std::vector<unsigned char> data;
+@@ -900,6 +982,10 @@ void run_benchmark_examples(const std::string& kernel_path,
+             const cl_mem text_buf = cache_it->second.buf;
+             const auto pattern = sample_pattern_from_text(text_ref, ex.pattern_len, ex.offset);
+ 
++            // H2: vazão (bytes do texto) e taxa de colisões do filtro — medidas 1x, fora do laço cronometrado.
++            const uint64_t text_bytes = static_cast<uint64_t>(text_ref.size());
++            const CollisionStats cs = count_filter_collisions(text_ref, pattern);
++
+             // ---------------------------------------------------------------
+             // Regime WARM: repetições para todos os cenários (texto já em VRAM).
+             // ---------------------------------------------------------------
+@@ -961,6 +1047,9 @@ void run_benchmark_examples(const std::string& kernel_path,
+             warm.gpu_total_ms = wall_s.median;
+             warm.speedup = (wall_s.median > 0.0) ? (cpu_s.median / wall_s.median) : 0.0;
+             warm.found_total = found_total; warm.overflow = overflow_flag; warm.same_indices = same_idx;
++            warm.text_bytes = text_bytes; warm.probes = cs.probes;
++            warm.filter_candidates = cs.filter_candidates; warm.chain_verifications = cs.chain_verifications;
++            warm.memcmp_calls = cs.memcmp_calls; warm.matches = cs.matches;
+             timing_rows.push_back(warm);
+ 
+             // Linha COLD (1ª aparição): leitura de disco cobrada de AMBOS os lados (comparação justa).
+@@ -976,6 +1065,9 @@ void run_benchmark_examples(const std::string& kernel_path,
+                 cold.gpu_total_ms = file_read_ms + upload_stats.median + wall_s.median;
+                 cold.speedup = (cold.gpu_total_ms > 0.0) ? (cold.cpu_total_ms / cold.gpu_total_ms) : 0.0;
+                 cold.found_total = found_total; cold.overflow = overflow_flag; cold.same_indices = same_idx;
++                cold.text_bytes = text_bytes; cold.probes = cs.probes;
++                cold.filter_candidates = cs.filter_candidates; cold.chain_verifications = cs.chain_verifications;
++                cold.memcmp_calls = cs.memcmp_calls; cold.matches = cs.matches;
+                 timing_rows.push_back(cold);
+             }
+ 
+diff --git a/rodar_tcc_final.bat b/rodar_tcc_final.bat
+index 11289ef..f80074f 100644
+--- a/rodar_tcc_final.bat
++++ b/rodar_tcc_final.bat
+@@ -36,12 +36,33 @@ for %%F in (dna.100MB english.100MB proteins.100MB) do (
+ )
+ echo [OK] Corpus bd\*.100MB presente.
+ 
++REM ---------------------------------------------------------------------------
++REM 0.1) H1 (sec 4.1): captura do ambiente do host -> ambiente.txt
++REM      (CPU/RAM/disco/SO/driver/compilador; o device OpenCL sai no [DEVICE] do stdout)
++REM ---------------------------------------------------------------------------
++if not exist "%OUTDIR%" mkdir "%OUTDIR%"
++echo [INFO] Capturando ambiente do host para %OUTDIR%\ambiente.txt
++echo === CPU === > "%OUTDIR%\ambiente.txt"
++powershell -NoProfile -Command "Get-CimInstance Win32_Processor | Select-Object Name,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors | Format-List" >> "%OUTDIR%\ambiente.txt" 2>&1
++echo === Memoria RAM === >> "%OUTDIR%\ambiente.txt"
++powershell -NoProfile -Command "'{0:N1} GB total' -f ((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB); Get-CimInstance Win32_PhysicalMemory | Select-Object @{n='CapacidadeGB';e={[math]::Round($_.Capacity/1GB,1)}},Speed,Manufacturer | Format-List" >> "%OUTDIR%\ambiente.txt" 2>&1
++echo === Disco === >> "%OUTDIR%\ambiente.txt"
++powershell -NoProfile -Command "Get-CimInstance Win32_DiskDrive | Select-Object Model,MediaType,@{n='TamGB';e={[math]::Round($_.Size/1GB,1)}} | Format-List" >> "%OUTDIR%\ambiente.txt" 2>&1
++echo === GPU / Driver === >> "%OUTDIR%\ambiente.txt"
++powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,@{n='VRAM_MB';e={[math]::Round($_.AdapterRAM/1MB,0)}} | Format-List" >> "%OUTDIR%\ambiente.txt" 2>&1
++echo === Sistema Operacional === >> "%OUTDIR%\ambiente.txt"
++powershell -NoProfile -Command "$o=Get-CimInstance Win32_OperatingSystem; $o.Caption + ' (build ' + $o.BuildNumber + ')'" >> "%OUTDIR%\ambiente.txt" 2>&1
++echo === Compilador host === >> "%OUTDIR%\ambiente.txt"
++cl >> "%OUTDIR%\ambiente.txt" 2>&1
++g++ --version >> "%OUTDIR%\ambiente.txt" 2>&1
++echo [OK] Ambiente salvo em %OUTDIR%\ambiente.txt
++
+ REM ---------------------------------------------------------------------------
+ REM 1) Build: MSVC -> fallback g++
+ REM ---------------------------------------------------------------------------
+ where cl >nul 2>&1
+ if %ERRORLEVEL%==0 (
+-    echo [INFO] Compilando com MSVC (cl.exe)...
++    echo [INFO] Compilando com MSVC ^(cl.exe^)...
+     if defined OPENCL_SDK (
+         set "OCL_INC=/I"%OPENCL_SDK%\include""
+         set "OCL_LIB=/LIBPATH:"%OPENCL_SDK%\lib\x64""
+@@ -85,7 +106,7 @@ set "RUN_RC=!ERRORLEVEL!"
+ type "%OUTDIR%\stdout.txt"
+ 
+ if not "%RUN_RC%"=="0" (
+-    echo [FALHA] A execucao do benchmark retornou erro (%RUN_RC%). Veja %OUTDIR%\stdout.txt.
++    echo [FALHA] A execucao do benchmark retornou erro ^(%RUN_RC%^). Veja %OUTDIR%\stdout.txt.
+     exit /b 1
+ )
+ 
