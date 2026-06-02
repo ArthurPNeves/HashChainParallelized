@@ -1,0 +1,439 @@
+[SETUP] OpenCL context+kernel build (uma vez): 248.969 ms
+[DEVICE] name=gfx1200 | vendor=Advanced Micro Devices, Inc. | driver=3679.0 (PAL,LC) | cl_version=OpenCL 2.0 AMD-APP (3679.0) | compute_units=16 | global_mem_MiB=16304 | max_workgroup=256
+[CONFIG] repeticoes(warmup+amostras)=1+30
+
+=== benchmark-example:dna:cpu ===
+text: bd/dna.100MB
+pattern_len: 16
+max_results: 1000000
+found_total: 3
+returned_indices: 3
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 23.093
+indices_preview(3): 1000000, 59337108, 69664436
+
+=== benchmark-example:dna:gpu ===
+text: bd/dna.100MB
+pattern_len: 16
+chunk_size: 262144
+max_results: 1000000
+found_total: 3
+returned_indices: 3
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 17.701
+D2H(ms): 0.025
+GPU_total(ms): 17.725
+GPU_wall(ms): 18.242
+indices_preview(3): 1000000, 59337108, 69664436
+[STATS] benchmark-example:dna m=16 | CPU search med=23.213ms (cv=5.455%) | GPU wall med=14.884ms (cv=26.256%) | speedup_warm=1.560x | COLD speedup=0.978x (read=78.655ms, upload med=10.672ms)
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-cpu_20260602_222131.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-gpu_20260602_222131.csv
+
+=== benchmark-example:english:cpu ===
+text: bd/english.100MB
+pattern_len: 64
+max_results: 1000000
+found_total: 2
+returned_indices: 2
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 6.046
+indices_preview(2): 20000000, 20880858
+
+=== benchmark-example:english:gpu ===
+text: bd/english.100MB
+pattern_len: 64
+chunk_size: 262144
+max_results: 1000000
+found_total: 2
+returned_indices: 2
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 2.044
+D2H(ms): 0.013
+GPU_total(ms): 2.056
+GPU_wall(ms): 2.540
+indices_preview(2): 20000000, 20880858
+[STATS] benchmark-example:english m=64 | CPU search med=6.196ms (cv=11.832%) | GPU wall med=2.548ms (cv=6.420%) | speedup_warm=2.432x | COLD speedup=0.921x (read=75.356ms, upload med=10.600ms)
+CSV salvo em: results-csv\final/indices\benchmark-example_english-cpu_20260602_222131.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_english-gpu_20260602_222131.csv
+
+=== benchmark-example:protein:cpu ===
+text: bd/proteins.100MB
+pattern_len: 32
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 8.555
+indices_preview(1): 5000000
+
+=== benchmark-example:protein:gpu ===
+text: bd/proteins.100MB
+pattern_len: 32
+chunk_size: 262144
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 3.967
+D2H(ms): 0.013
+GPU_total(ms): 3.980
+GPU_wall(ms): 4.428
+indices_preview(1): 5000000
+[STATS] benchmark-example:protein m=32 | CPU search med=9.107ms (cv=7.735%) | GPU wall med=4.559ms (cv=2.290%) | speedup_warm=1.998x | COLD speedup=0.939x (read=82.174ms, upload med=10.457ms)
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-cpu_20260602_222132.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-gpu_20260602_222132.csv
+
+=== benchmark-example:dna-extra-8:cpu ===
+text: bd/dna.100MB
+pattern_len: 8
+max_results: 1000000
+found_total: 3211
+returned_indices: 3211
+overflow: false
+preprocessing(ms): 0.001
+search(ms): 182.010
+indices_preview(10): 70787, 99117, 214539, 282154, 294959, 403969, 435830, 469042, 484846, 500352
+
+=== benchmark-example:dna-extra-8:gpu ===
+text: bd/dna.100MB
+pattern_len: 8
+chunk_size: 262144
+max_results: 1000000
+found_total: 3211
+returned_indices: 3211
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 67.881
+D2H(ms): 0.013
+GPU_total(ms): 67.894
+GPU_wall(ms): 68.783
+indices_preview(10): 70787, 99117, 214539, 282154, 294959, 403969, 435830, 469042, 484846, 500352
+[STATS] benchmark-example:dna-extra-8 m=8 | CPU search med=186.483ms (cv=2.996%) | GPU wall med=64.499ms (cv=11.760%) | speedup_warm=2.891x
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-extra-8-cpu_20260602_222140.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-extra-8-gpu_20260602_222140.csv
+
+=== benchmark-example:dna-extra-32:cpu ===
+text: bd/dna.100MB
+pattern_len: 32
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 10.434
+indices_preview(1): 2000000
+
+=== benchmark-example:dna-extra-32:gpu ===
+text: bd/dna.100MB
+pattern_len: 32
+chunk_size: 262144
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 4.174
+D2H(ms): 0.016
+GPU_total(ms): 4.191
+GPU_wall(ms): 4.731
+indices_preview(1): 2000000
+[STATS] benchmark-example:dna-extra-32 m=32 | CPU search med=9.122ms (cv=10.580%) | GPU wall med=4.736ms (cv=2.163%) | speedup_warm=1.926x
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-extra-32-cpu_20260602_222140.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-extra-32-gpu_20260602_222140.csv
+
+=== benchmark-example:dna-extra-64:cpu ===
+text: bd/dna.100MB
+pattern_len: 64
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 6.196
+indices_preview(1): 3000000
+
+=== benchmark-example:dna-extra-64:gpu ===
+text: bd/dna.100MB
+pattern_len: 64
+chunk_size: 262144
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 2.247
+D2H(ms): 0.013
+GPU_total(ms): 2.260
+GPU_wall(ms): 2.825
+indices_preview(1): 3000000
+[STATS] benchmark-example:dna-extra-64 m=64 | CPU search med=6.480ms (cv=9.453%) | GPU wall med=2.776ms (cv=3.504%) | speedup_warm=2.334x
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-extra-64-cpu_20260602_222141.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-extra-64-gpu_20260602_222141.csv
+
+=== benchmark-example:dna-extra-128:cpu ===
+text: bd/dna.100MB
+pattern_len: 128
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 4.637
+indices_preview(1): 4000000
+
+=== benchmark-example:dna-extra-128:gpu ===
+text: bd/dna.100MB
+pattern_len: 128
+chunk_size: 262144
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 1.258
+D2H(ms): 0.013
+GPU_total(ms): 1.270
+GPU_wall(ms): 1.674
+indices_preview(1): 4000000
+[STATS] benchmark-example:dna-extra-128 m=128 | CPU search med=4.631ms (cv=8.880%) | GPU wall med=1.745ms (cv=6.659%) | speedup_warm=2.655x
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-extra-128-cpu_20260602_222141.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_dna-extra-128-gpu_20260602_222141.csv
+
+=== benchmark-example:english-extra-8:cpu ===
+text: bd/english.100MB
+pattern_len: 8
+max_results: 1000000
+found_total: 3475
+returned_indices: 3475
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 188.913
+indices_preview(10): 9318, 30638, 39228, 39664, 40686, 42137, 51404, 84501, 88769, 104897
+
+=== benchmark-example:english-extra-8:gpu ===
+text: bd/english.100MB
+pattern_len: 8
+chunk_size: 262144
+max_results: 1000000
+found_total: 3475
+returned_indices: 3475
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 59.142
+D2H(ms): 0.011
+GPU_total(ms): 59.153
+GPU_wall(ms): 60.326
+indices_preview(10): 9318, 30638, 39228, 39664, 40686, 42137, 51404, 84501, 88769, 104897
+[STATS] benchmark-example:english-extra-8 m=8 | CPU search med=186.453ms (cv=3.137%) | GPU wall med=57.606ms (cv=13.627%) | speedup_warm=3.237x
+CSV salvo em: results-csv\final/indices\benchmark-example_english-extra-8-cpu_20260602_222149.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_english-extra-8-gpu_20260602_222149.csv
+
+=== benchmark-example:english-extra-16:cpu ===
+text: bd/english.100MB
+pattern_len: 16
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 30.030
+indices_preview(1): 2000000
+
+=== benchmark-example:english-extra-16:gpu ===
+text: bd/english.100MB
+pattern_len: 16
+chunk_size: 262144
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 9.832
+D2H(ms): 0.013
+GPU_total(ms): 9.845
+GPU_wall(ms): 10.678
+indices_preview(1): 2000000
+[STATS] benchmark-example:english-extra-16 m=16 | CPU search med=23.017ms (cv=8.466%) | GPU wall med=17.295ms (cv=25.928%) | speedup_warm=1.331x
+CSV salvo em: results-csv\final/indices\benchmark-example_english-extra-16-cpu_20260602_222150.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_english-extra-16-gpu_20260602_222150.csv
+
+=== benchmark-example:english-extra-32:cpu ===
+text: bd/english.100MB
+pattern_len: 32
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 10.968
+indices_preview(1): 10000000
+
+=== benchmark-example:english-extra-32:gpu ===
+text: bd/english.100MB
+pattern_len: 32
+chunk_size: 262144
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 3.903
+D2H(ms): 0.013
+GPU_total(ms): 3.916
+GPU_wall(ms): 4.586
+indices_preview(1): 10000000
+[STATS] benchmark-example:english-extra-32 m=32 | CPU search med=9.363ms (cv=10.494%) | GPU wall med=4.569ms (cv=2.250%) | speedup_warm=2.049x
+CSV salvo em: results-csv\final/indices\benchmark-example_english-extra-32-cpu_20260602_222150.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_english-extra-32-gpu_20260602_222150.csv
+
+=== benchmark-example:english-extra-128:cpu ===
+text: bd/english.100MB
+pattern_len: 128
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+preprocessing(ms): 0.001
+search(ms): 5.383
+indices_preview(1): 30000000
+
+=== benchmark-example:english-extra-128:gpu ===
+text: bd/english.100MB
+pattern_len: 128
+chunk_size: 262144
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 1.247
+D2H(ms): 0.013
+GPU_total(ms): 1.260
+GPU_wall(ms): 1.864
+indices_preview(1): 30000000
+[STATS] benchmark-example:english-extra-128 m=128 | CPU search med=4.748ms (cv=8.490%) | GPU wall med=1.770ms (cv=4.154%) | speedup_warm=2.683x
+CSV salvo em: results-csv\final/indices\benchmark-example_english-extra-128-cpu_20260602_222151.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_english-extra-128-gpu_20260602_222151.csv
+
+=== benchmark-example:protein-extra-8:cpu ===
+text: bd/proteins.100MB
+pattern_len: 8
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 186.240
+indices_preview(1): 1000000
+
+=== benchmark-example:protein-extra-8:gpu ===
+text: bd/proteins.100MB
+pattern_len: 8
+chunk_size: 262144
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 68.229
+D2H(ms): 0.015
+GPU_total(ms): 68.244
+GPU_wall(ms): 69.415
+indices_preview(1): 1000000
+[STATS] benchmark-example:protein-extra-8 m=8 | CPU search med=194.784ms (cv=3.176%) | GPU wall med=56.392ms (cv=13.045%) | speedup_warm=3.454x
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-extra-8-cpu_20260602_222159.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-extra-8-gpu_20260602_222159.csv
+
+=== benchmark-example:protein-extra-16:cpu ===
+text: bd/proteins.100MB
+pattern_len: 16
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 21.088
+indices_preview(1): 3000000
+
+=== benchmark-example:protein-extra-16:gpu ===
+text: bd/proteins.100MB
+pattern_len: 16
+chunk_size: 262144
+max_results: 1000000
+found_total: 1
+returned_indices: 1
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 9.847
+D2H(ms): 0.014
+GPU_total(ms): 9.861
+GPU_wall(ms): 10.397
+indices_preview(1): 3000000
+[STATS] benchmark-example:protein-extra-16 m=16 | CPU search med=22.951ms (cv=12.982%) | GPU wall med=10.656ms (cv=26.775%) | speedup_warm=2.154x
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-extra-16-cpu_20260602_222200.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-extra-16-gpu_20260602_222200.csv
+
+=== benchmark-example:protein-extra-64:cpu ===
+text: bd/proteins.100MB
+pattern_len: 64
+max_results: 1000000
+found_total: 55
+returned_indices: 55
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 8.582
+indices_preview(10): 5544450, 5737364, 5737746, 5741184, 5741566, 5742712, 5743094, 5743476, 5743858, 5744240
+
+=== benchmark-example:protein-extra-64:gpu ===
+text: bd/proteins.100MB
+pattern_len: 64
+chunk_size: 262144
+max_results: 1000000
+found_total: 55
+returned_indices: 55
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 2.842
+D2H(ms): 0.013
+GPU_total(ms): 2.855
+GPU_wall(ms): 3.439
+indices_preview(10): 5544450, 5737364, 5737746, 5741184, 5741566, 5742712, 5743094, 5743476, 5743858, 5744240
+[STATS] benchmark-example:protein-extra-64 m=64 | CPU search med=6.416ms (cv=13.229%) | GPU wall med=3.343ms (cv=4.833%) | speedup_warm=1.919x
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-extra-64-cpu_20260602_222200.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-extra-64-gpu_20260602_222200.csv
+
+=== benchmark-example:protein-extra-128:cpu ===
+text: bd/proteins.100MB
+pattern_len: 128
+max_results: 1000000
+found_total: 24
+returned_indices: 24
+overflow: false
+preprocessing(ms): 0.000
+search(ms): 6.937
+indices_preview(10): 7988540, 7988922, 7989304, 7991596, 7991978, 7992360, 7995416, 8000000, 8000382, 8000764
+
+=== benchmark-example:protein-extra-128:gpu ===
+text: bd/proteins.100MB
+pattern_len: 128
+chunk_size: 262144
+max_results: 1000000
+found_total: 24
+returned_indices: 24
+overflow: false
+H2D(ms): 0.000
+kernel(ms): 1.836
+D2H(ms): 0.013
+GPU_total(ms): 1.849
+GPU_wall(ms): 2.331
+indices_preview(10): 7988540, 7988922, 7989304, 7991596, 7991978, 7992360, 7995416, 8000000, 8000382, 8000764
+[STATS] benchmark-example:protein-extra-128 m=128 | CPU search med=5.022ms (cv=13.390%) | GPU wall med=2.340ms (cv=5.238%) | speedup_warm=2.146x
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-extra-128-cpu_20260602_222200.csv
+CSV salvo em: results-csv\final/indices\benchmark-example_protein-extra-128-gpu_20260602_222200.csv
+CSV de timings salvo em: results-csv\final\timings_20260602_222200.csv

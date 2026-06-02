@@ -1,0 +1,54 @@
+=== CPU === 
+
+
+Name                      : Intel(R) Core(TM) i5-14400F
+MaxClockSpeed             : 2500
+NumberOfCores             : 10
+NumberOfLogicalProcessors : 16
+
+
+
+=== Memoria RAM === 
+31,8 GB total
+
+
+CapacidadeGB : 16
+Speed        : 3200
+Manufacturer : Lexar Co Limited
+
+CapacidadeGB : 16
+Speed        : 3200
+Manufacturer : Lexar Co Limited
+
+
+
+=== Disco === 
+
+
+Model     : KINGSTON SNV2S1000G
+MediaType : Fixed hard disk media
+TamGB     : 931,5
+
+
+
+=== GPU / Driver === 
+
+
+Name          : AMD Radeon RX 9060 XT
+DriverVersion : 32.0.31007.5012
+VRAM_MB       : 4095
+
+
+
+=== Sistema Operacional === 
+Microsoft Windows 11 Home (build 26200)
+=== Compilador host === 
+Microsoft (R) C/C++ Optimizing Compiler Versão 19.50.35728 para x64
+Copyright (C) Microsoft Corporation. Todos os direitos reservados.
+
+uso: cl [ option... ] filename... [ /link linkoption... ]
+g++ (MinGW.org GCC-6.3.0-1) 6.3.0
+Copyright (C) 2016 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+

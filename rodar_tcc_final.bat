@@ -37,11 +37,32 @@ for %%F in (dna.100MB english.100MB proteins.100MB) do (
 echo [OK] Corpus bd\*.100MB presente.
 
 REM ---------------------------------------------------------------------------
+REM 0.1) H1 (sec 4.1): captura do ambiente do host -> ambiente.txt
+REM      (CPU/RAM/disco/SO/driver/compilador; o device OpenCL sai no [DEVICE] do stdout)
+REM ---------------------------------------------------------------------------
+if not exist "%OUTDIR%" mkdir "%OUTDIR%"
+echo [INFO] Capturando ambiente do host para %OUTDIR%\ambiente.txt
+echo === CPU === > "%OUTDIR%\ambiente.txt"
+powershell -NoProfile -Command "Get-CimInstance Win32_Processor | Select-Object Name,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors | Format-List" >> "%OUTDIR%\ambiente.txt" 2>&1
+echo === Memoria RAM === >> "%OUTDIR%\ambiente.txt"
+powershell -NoProfile -Command "'{0:N1} GB total' -f ((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB); Get-CimInstance Win32_PhysicalMemory | Select-Object @{n='CapacidadeGB';e={[math]::Round($_.Capacity/1GB,1)}},Speed,Manufacturer | Format-List" >> "%OUTDIR%\ambiente.txt" 2>&1
+echo === Disco === >> "%OUTDIR%\ambiente.txt"
+powershell -NoProfile -Command "Get-CimInstance Win32_DiskDrive | Select-Object Model,MediaType,@{n='TamGB';e={[math]::Round($_.Size/1GB,1)}} | Format-List" >> "%OUTDIR%\ambiente.txt" 2>&1
+echo === GPU / Driver === >> "%OUTDIR%\ambiente.txt"
+powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,@{n='VRAM_MB';e={[math]::Round($_.AdapterRAM/1MB,0)}} | Format-List" >> "%OUTDIR%\ambiente.txt" 2>&1
+echo === Sistema Operacional === >> "%OUTDIR%\ambiente.txt"
+powershell -NoProfile -Command "$o=Get-CimInstance Win32_OperatingSystem; $o.Caption + ' (build ' + $o.BuildNumber + ')'" >> "%OUTDIR%\ambiente.txt" 2>&1
+echo === Compilador host === >> "%OUTDIR%\ambiente.txt"
+cl >> "%OUTDIR%\ambiente.txt" 2>&1
+g++ --version >> "%OUTDIR%\ambiente.txt" 2>&1
+echo [OK] Ambiente salvo em %OUTDIR%\ambiente.txt
+
+REM ---------------------------------------------------------------------------
 REM 1) Build: MSVC -> fallback g++
 REM ---------------------------------------------------------------------------
 where cl >nul 2>&1
 if %ERRORLEVEL%==0 (
-    echo [INFO] Compilando com MSVC (cl.exe)...
+    echo [INFO] Compilando com MSVC ^(cl.exe^)...
     if defined OPENCL_SDK (
         set "OCL_INC=/I"%OPENCL_SDK%\include""
         set "OCL_LIB=/LIBPATH:"%OPENCL_SDK%\lib\x64""
@@ -85,7 +106,7 @@ set "RUN_RC=!ERRORLEVEL!"
 type "%OUTDIR%\stdout.txt"
 
 if not "%RUN_RC%"=="0" (
-    echo [FALHA] A execucao do benchmark retornou erro (%RUN_RC%). Veja %OUTDIR%\stdout.txt.
+    echo [FALHA] A execucao do benchmark retornou erro ^(%RUN_RC%^). Veja %OUTDIR%\stdout.txt.
     exit /b 1
 )
 

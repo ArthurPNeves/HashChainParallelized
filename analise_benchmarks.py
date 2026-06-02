@@ -245,18 +245,34 @@ def imprimir_tabela(df: pd.DataFrame) -> None:
     def linha(vals):
         return "| " + " | ".join(str(v) for v in vals) + " |"
 
+    # H2 (§4.3): vazão (Throughput) = bytes do texto / tempo. GB com GB = 1e9 bytes.
+    tem_vazao = "text_bytes" in df.columns
+
+    def vazao_gbs(text_bytes: float, ms: float) -> float:
+        if text_bytes and text_bytes > 0 and ms and ms > 0:
+            return float(text_bytes) / float(ms) / 1e6  # bytes / ms / 1e6 == bytes/(s)/1e9
+        return float("nan")
+
     print("\n## Tabela — regime WARM (mediana ± CV%)\n")
     hdr = ["Base", "m", "CPU search (ms)", "GPU wall (ms)", "Speedup"]
+    if tem_vazao:
+        hdr += ["Vazão CPU (GB/s)", "Vazão GPU (GB/s)"]
     print(linha(hdr))
     print(linha(["---"] * len(hdr)))
     warm = df[df["regime"] == "warm"].sort_values(["base", "pattern_len"])
     for _, r in warm.iterrows():
-        print(linha([
+        cols = [
             r["base"], int(r["pattern_len"]),
             f"{r['cpu_search_ms_median']:.2f} ± {r['cpu_search_ms_cv']:.1f}%",
             f"{r['gpu_query_wall_ms_median']:.2f} ± {r['gpu_query_wall_ms_cv']:.1f}%",
             f"{r['speedup']:.2f}×",
-        ]))
+        ]
+        if tem_vazao:
+            cols += [
+                f"{vazao_gbs(r['text_bytes'], r['cpu_search_ms_median']):.2f}",
+                f"{vazao_gbs(r['text_bytes'], r['gpu_query_wall_ms_median']):.2f}",
+            ]
+        print(linha(cols))
 
     print("\n## Tabela — regime COLD (leitura cobrada de ambos os lados)\n")
     hdr = ["Base", "m", "leitura (ms)", "upload (ms)", "CPU total (ms)", "GPU total (ms)", "Speedup"]
@@ -271,6 +287,26 @@ def imprimir_tabela(df: pd.DataFrame) -> None:
             f"{r['cpu_total_ms']:.1f}", f"{r['gpu_total_ms']:.1f}",
             f"{r['speedup']:.2f}×",
         ]))
+
+    # H2 (§4.3): taxa de colisões do filtro F (falsos positivos) — "verificações desnecessárias".
+    if "filter_candidates" in df.columns:
+        print("\n## Tabela — colisões do filtro $F$ (regime warm)\n")
+        hdr = ["Base", "m", "candidatos", "ocorrências", "FP filtro (%)", "FP memcmp (%)", "candidatos/KiB"]
+        print(linha(hdr))
+        print(linha(["---"] * len(hdr)))
+        for _, r in warm.iterrows():
+            cand = float(r["filter_candidates"])
+            mtc = float(r["matches"]) if "matches" in df.columns else float(r.get("found_total", 0))
+            memc = float(r["memcmp_calls"]) if "memcmp_calls" in df.columns else float("nan")
+            fp_filtro = (cand - mtc) / max(cand, 1.0) * 100.0
+            fp_memcmp = (memc - mtc) / max(memc, 1.0) * 100.0 if np.isfinite(memc) else float("nan")
+            tb = float(r["text_bytes"]) if "text_bytes" in df.columns else float("nan")
+            cand_kib = cand / (tb / 1024.0) if np.isfinite(tb) and tb > 0 else float("nan")
+            print(linha([
+                r["base"], int(r["pattern_len"]),
+                f"{int(cand)}", f"{int(mtc)}",
+                f"{fp_filtro:.2f}", f"{fp_memcmp:.2f}", f"{cand_kib:.3f}",
+            ]))
 
 
 def main() -> None:
