@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
@@ -100,6 +101,32 @@ std::string read_text_file(const std::string& file_path) {
     std::ostringstream ss;
     ss << in.rdbuf();
     return ss.str();
+}
+
+// Estatística de benchmark: mediana e coeficiente de variação (CV%, = desvio/média*100).
+// A mediana é robusta a outliers de escalonamento; o CV% mede a dispersão relativa.
+struct Stats {
+    double median = 0.0;
+    double cv = 0.0;
+};
+
+Stats compute_stats(std::vector<double> samples) {
+    Stats s;
+    if (samples.empty()) return s;
+    std::sort(samples.begin(), samples.end());
+    const size_t n = samples.size();
+    s.median = (n % 2 == 1) ? samples[n / 2]
+                            : 0.5 * (samples[n / 2 - 1] + samples[n / 2]);
+    double sum = 0.0;
+    for (double v : samples) sum += v;
+    const double mean = sum / static_cast<double>(n);
+    if (mean > 0.0 && n > 1) {
+        double acc = 0.0;
+        for (double v : samples) acc += (v - mean) * (v - mean);
+        const double stddev = std::sqrt(acc / static_cast<double>(n - 1));
+        s.cv = (stddev / mean) * 100.0;
+    }
+    return s;
 }
 
 double event_millis(cl_event evt) {
@@ -477,7 +504,7 @@ RunResult run_hc8_gpu_inner(OclContext& ocl,
     clReleaseMemObject(count_buf);
     clReleaseMemObject(overflow_buf);
 
-    std::cout << "[CPU] preprocessing(ms): " << std::fixed << std::setprecision(3) << preprocessing_ms << "\n";
+    (void)preprocessing_ms;  // preprocessamento medido no host; não logado por repetição (evita ruído)
 
     return out;
 }
@@ -699,11 +726,69 @@ void write_run_csv_cpu(const std::string& csv_dir,
     std::cout << "CSV salvo em: " << out_path.string() << "\n";
 }
 
+// Uma linha por (cenário, regime) do CSV de timings: fonte oficial da Tabela 1 e das figuras.
+// Toda agregação estatística (mediana+CV%) é feita aqui no host; o Python apenas lê e plota.
+struct TimingsRow {
+    std::string run_tag;
+    std::string text_file;
+    std::string base;
+    int pattern_len = 0;
+    std::string regime;       // "cold" ou "warm"
+    int repeats = 0;
+    Stats cpu_search;         // tempo de busca sequencial (mediana+CV%)
+    double cpu_preproc_ms = 0.0;
+    double file_read_ms = 0.0;       // leitura de disco (só cold)
+    Stats gpu_upload;         // RAM->VRAM: pin+memcpy+DMA (só cold)
+    double h2d_ms = 0.0;             // transferência de pattern/F por consulta (pequena)
+    Stats kernel;             // kernel de busca (mediana+CV%)
+    double d2h_ms = 0.0;
+    Stats gpu_query_wall;     // wall por consulta (exclui upload do texto e contexto)
+    double cpu_total_ms = 0.0;
+    double gpu_total_ms = 0.0;
+    double speedup = 0.0;
+    uint32_t found_total = 0;
+    bool overflow = false;
+    bool same_indices = true;
+};
+
+void write_timings_csv(const std::string& csv_dir, const std::vector<TimingsRow>& rows) {
+    std::filesystem::create_directories(csv_dir);
+    const std::string file_name = "timings_" + now_compact_utc() + ".csv";
+    const std::filesystem::path out_path = std::filesystem::path(csv_dir) / file_name;
+
+    std::ofstream out(out_path, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("Falha ao criar CSV de timings: " + out_path.string());
+    }
+
+    out << "run_tag,text_file,base,pattern_len,regime,repeats,"
+           "cpu_search_ms_median,cpu_search_ms_cv,cpu_preproc_ms,"
+           "file_read_ms,gpu_upload_ms_median,gpu_upload_ms_cv,"
+           "h2d_ms,kernel_ms_median,kernel_ms_cv,d2h_ms,gpu_query_wall_ms_median,gpu_query_wall_ms_cv,"
+           "cpu_total_ms,gpu_total_ms,speedup,found_total,overflow,same_indices\n";
+    out << std::fixed << std::setprecision(4);
+
+    for (const auto& r : rows) {
+        out << '"' << r.run_tag << "\",\"" << r.text_file << "\",\"" << r.base << "\","
+            << r.pattern_len << ',' << r.regime << ',' << r.repeats << ','
+            << r.cpu_search.median << ',' << r.cpu_search.cv << ',' << r.cpu_preproc_ms << ','
+            << r.file_read_ms << ',' << r.gpu_upload.median << ',' << r.gpu_upload.cv << ','
+            << r.h2d_ms << ',' << r.kernel.median << ',' << r.kernel.cv << ',' << r.d2h_ms << ','
+            << r.gpu_query_wall.median << ',' << r.gpu_query_wall.cv << ','
+            << r.cpu_total_ms << ',' << r.gpu_total_ms << ',' << r.speedup << ','
+            << r.found_total << ',' << (r.overflow ? 1 : 0) << ',' << (r.same_indices ? 1 : 0) << '\n';
+    }
+
+    std::cout << "CSV de timings salvo em: " << out_path.string() << "\n";
+}
+
 void run_benchmark_examples(const std::string& kernel_path,
                             int chunk_size,
                             int max_results,
                             const std::string& csv_dir,
-                            bool export_csv) {
+                            bool export_csv,
+                            int repeat,
+                            int warmup) {
     struct Example {
         std::string tag;
         std::string text_file;
@@ -758,42 +843,159 @@ void run_benchmark_examples(const std::string& kernel_path,
         }
     };
 
+    std::vector<TimingsRow> timing_rows;
+
+    auto base_of = [](const std::string& tf) -> std::string {
+        if (tf.find("english") != std::string::npos) return "English";
+        if (tf.find("dna") != std::string::npos) return "DNA";
+        if (tf.find("protein") != std::string::npos) return "Proteins";
+        return "Outros";
+    };
+
+    std::cout << "[CONFIG] repeticoes(warmup+amostras)=" << warmup << "+" << repeat << "\n";
+
     try {
         for (const auto& ex : examples) {
-            double text_h2d_ms = 0.0;
-            double text_wall_ms = 0.0;
-
+            // ---------------------------------------------------------------
+            // Regime COLD: primeira aparição de cada texto (1x por base).
+            // Custo inerente: leitura de disco (1x) + upload RAM->VRAM (medido N vezes).
+            // ---------------------------------------------------------------
             auto cache_it = text_cache.find(ex.text_file);
-            if (cache_it == text_cache.end()) {
-                const auto t0 = std::chrono::high_resolution_clock::now();
+            const bool first_load = (cache_it == text_cache.end());
+
+            double file_read_ms = 0.0;
+            Stats upload_stats;  // só preenchido no cold
+
+            if (first_load) {
+                const auto r0 = std::chrono::high_resolution_clock::now();
+                std::vector<unsigned char> data = read_binary_file(ex.text_file);
+                const auto r1 = std::chrono::high_resolution_clock::now();
+                file_read_ms = std::chrono::duration<double, std::milli>(r1 - r0).count();
+
+                std::vector<double> upload_samples;
+                upload_samples.reserve(static_cast<size_t>(repeat));
+                cl_mem last_buf = nullptr;
+                for (int it = 0; it < warmup + repeat; ++it) {
+                    const auto u0 = std::chrono::high_resolution_clock::now();
+                    PinnedTextUpload up = upload_text_pinned(ocl, data);
+                    const auto u1 = std::chrono::high_resolution_clock::now();
+                    if (it >= warmup) {
+                        upload_samples.push_back(std::chrono::duration<double, std::milli>(u1 - u0).count());
+                    }
+                    if (it + 1 < warmup + repeat) {
+                        clReleaseMemObject(up.device_buf);  // descarta e remede
+                    } else {
+                        last_buf = up.device_buf;           // mantém o último em cache
+                    }
+                }
+                upload_stats = compute_stats(upload_samples);
+
                 CachedText c;
-                c.data = read_binary_file(ex.text_file);
-                PinnedTextUpload up = upload_text_pinned(ocl, c.data);
-                c.buf = up.device_buf;
-                text_h2d_ms = up.h2d_ms;
-                const auto t1 = std::chrono::high_resolution_clock::now();
-                text_wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                c.data = std::move(data);
+                c.buf = last_buf;
                 cache_it = text_cache.emplace(ex.text_file, std::move(c)).first;
             }
 
             const std::vector<unsigned char>& text_ref = cache_it->second.data;
             const cl_mem text_buf = cache_it->second.buf;
-
             const auto pattern = sample_pattern_from_text(text_ref, ex.pattern_len, ex.offset);
 
-            const auto cpu = run_hc8_cpu(text_ref, pattern, max_results);
-            print_cpu_log(ex.tag + ":cpu", ex.text_file, ex.pattern_len, max_results, cpu);
+            // ---------------------------------------------------------------
+            // Regime WARM: repetições para todos os cenários (texto já em VRAM).
+            // ---------------------------------------------------------------
+            std::vector<double> cpu_search, gpu_wall, gpu_kernel, gpu_d2h, gpu_h2d;
+            cpu_search.reserve(static_cast<size_t>(repeat));
+            gpu_wall.reserve(static_cast<size_t>(repeat));
+            double cpu_preproc_ms = 0.0;
+            uint32_t found_total = 0;
+            bool overflow_flag = false;
+            bool same_idx = true;
+            CpuRunResult last_cpu;
+            RunResult last_gpu;
 
-            RunResult gpu = run_hc8_gpu_inner(ocl, text_buf, static_cast<int>(text_ref.size()), pattern, chunk_size, max_results);
-            gpu.h2d_ms += text_h2d_ms;
-            gpu.gpu_wall_ms += text_wall_ms;
+            for (int it = 0; it < warmup + repeat; ++it) {
+                CpuRunResult cpu = run_hc8_cpu(text_ref, pattern, max_results);
+                RunResult gpu = run_hc8_gpu_inner(ocl, text_buf, static_cast<int>(text_ref.size()),
+                                                  pattern, chunk_size, max_results);
 
-            print_log(ex.tag + ":gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, gpu);
-            compare_and_print(cpu, gpu);
+                const bool same_total = cpu.total_found == gpu.total_found;
+                const bool same_over = cpu.overflow == gpu.overflow;
+                const bool same_indices = cpu.indices == gpu.indices;
+                if (!(same_total && same_over && same_indices)) {
+                    same_idx = false;
+                    std::cout << "[REGRESSION-FAIL] " << ex.tag << " m=" << ex.pattern_len
+                              << " rep=" << it << " (total=" << same_total
+                              << " over=" << same_over << " indices=" << same_indices << ")\n";
+                }
+
+                if (it >= warmup) {
+                    cpu_search.push_back(cpu.search_ms);
+                    gpu_wall.push_back(gpu.gpu_wall_ms);
+                    gpu_kernel.push_back(gpu.kernel_ms);
+                    gpu_d2h.push_back(gpu.d2h_ms);
+                    gpu_h2d.push_back(gpu.h2d_ms);
+                    cpu_preproc_ms = cpu.preprocessing_ms;
+                    found_total = cpu.total_found;
+                    overflow_flag = cpu.overflow || gpu.overflow;
+                }
+
+                last_cpu = std::move(cpu);
+                last_gpu = std::move(gpu);
+            }
+
+            const Stats cpu_s = compute_stats(cpu_search);
+            const Stats wall_s = compute_stats(gpu_wall);
+            const Stats kern_s = compute_stats(gpu_kernel);
+            const double d2h_med = compute_stats(gpu_d2h).median;
+            const double h2d_med = compute_stats(gpu_h2d).median;
+            const std::string base = base_of(ex.text_file);
+
+            // Linha WARM (texto residente; comparação search-only vs wall por consulta).
+            TimingsRow warm;
+            warm.run_tag = ex.tag; warm.text_file = ex.text_file; warm.base = base;
+            warm.pattern_len = ex.pattern_len; warm.regime = "warm"; warm.repeats = repeat;
+            warm.cpu_search = cpu_s; warm.cpu_preproc_ms = cpu_preproc_ms;
+            warm.h2d_ms = h2d_med; warm.kernel = kern_s; warm.d2h_ms = d2h_med;
+            warm.gpu_query_wall = wall_s;
+            warm.cpu_total_ms = cpu_s.median;
+            warm.gpu_total_ms = wall_s.median;
+            warm.speedup = (wall_s.median > 0.0) ? (cpu_s.median / wall_s.median) : 0.0;
+            warm.found_total = found_total; warm.overflow = overflow_flag; warm.same_indices = same_idx;
+            timing_rows.push_back(warm);
+
+            // Linha COLD (1ª aparição): leitura de disco cobrada de AMBOS os lados (comparação justa).
+            if (first_load) {
+                TimingsRow cold;
+                cold.run_tag = ex.tag; cold.text_file = ex.text_file; cold.base = base;
+                cold.pattern_len = ex.pattern_len; cold.regime = "cold"; cold.repeats = repeat;
+                cold.cpu_search = cpu_s; cold.cpu_preproc_ms = cpu_preproc_ms;
+                cold.file_read_ms = file_read_ms; cold.gpu_upload = upload_stats;
+                cold.h2d_ms = h2d_med; cold.kernel = kern_s; cold.d2h_ms = d2h_med;
+                cold.gpu_query_wall = wall_s;
+                cold.cpu_total_ms = file_read_ms + cpu_preproc_ms + cpu_s.median;
+                cold.gpu_total_ms = file_read_ms + upload_stats.median + wall_s.median;
+                cold.speedup = (cold.gpu_total_ms > 0.0) ? (cold.cpu_total_ms / cold.gpu_total_ms) : 0.0;
+                cold.found_total = found_total; cold.overflow = overflow_flag; cold.same_indices = same_idx;
+                timing_rows.push_back(cold);
+            }
+
+            print_cpu_log(ex.tag + ":cpu", ex.text_file, ex.pattern_len, max_results, last_cpu);
+            print_log(ex.tag + ":gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, last_gpu);
+            std::cout << std::fixed << std::setprecision(3)
+                      << "[STATS] " << ex.tag << " m=" << ex.pattern_len
+                      << " | CPU search med=" << cpu_s.median << "ms (cv=" << cpu_s.cv << "%)"
+                      << " | GPU wall med=" << wall_s.median << "ms (cv=" << wall_s.cv << "%)"
+                      << " | speedup_warm=" << warm.speedup << "x";
+            if (first_load) {
+                std::cout << " | COLD speedup=" << timing_rows.back().speedup << "x"
+                          << " (read=" << file_read_ms << "ms, upload med=" << upload_stats.median << "ms)";
+            }
+            std::cout << "\n";
 
             if (export_csv) {
-                write_run_csv_cpu(csv_dir, ex.tag + "-cpu", ex.text_file, ex.pattern_len, max_results, cpu);
-                write_run_csv(csv_dir, ex.tag + "-gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, gpu);
+                const std::string idx_dir = csv_dir + "/indices";
+                write_run_csv_cpu(idx_dir, ex.tag + "-cpu", ex.text_file, ex.pattern_len, max_results, last_cpu);
+                write_run_csv(idx_dir, ex.tag + "-gpu", ex.text_file, ex.pattern_len, chunk_size, max_results, last_gpu);
             }
         }
     } catch (...) {
@@ -801,13 +1003,16 @@ void run_benchmark_examples(const std::string& kernel_path,
         throw;
     }
 
+    if (export_csv) {
+        write_timings_csv(csv_dir, timing_rows);
+    }
     release_cache();
 }
 
 void usage() {
     std::cout
         << "Uso:\n"
-        << "  main.exe --run-examples [--chunk-size 262144] [--max-results 1000000] [--csv-dir results-csv]\n"
+        << "  main.exe --run-examples [--repeat 30] [--warmup 1] [--chunk-size 262144] [--max-results 1000000] [--csv-dir results-csv]\n"
         << "  main.exe --text bd/dna.100MB --pattern ACGTACGT --chunk-size 262144 --max-results 1000000 [--csv-dir results-csv]  (roda CPU e GPU)\n"
         << "  main.exe --text bd/english.100MB --pattern-len 64 --pattern-offset 20000000 --chunk-size 262144 --max-results 1000000 [--csv-dir results-csv]  (roda CPU e GPU)\n"
         << "  main.exe --run-examples --no-csv\n";
@@ -826,6 +1031,8 @@ int main(int argc, char** argv) {
         std::string csv_dir = "results-csv";
         bool export_csv = true;
         bool run_examples = false;
+        int repeat = 30;
+        int warmup = 1;
 
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
@@ -841,6 +1048,10 @@ int main(int argc, char** argv) {
                 chunk_size = std::stoi(argv[++i]);
             } else if (a == "--max-results" && i + 1 < argc) {
                 max_results = std::stoi(argv[++i]);
+            } else if (a == "--repeat" && i + 1 < argc) {
+                repeat = std::stoi(argv[++i]);
+            } else if (a == "--warmup" && i + 1 < argc) {
+                warmup = std::stoi(argv[++i]);
             } else if (a == "--csv-dir" && i + 1 < argc) {
                 csv_dir = argv[++i];
             } else if (a == "--no-csv") {
@@ -859,8 +1070,11 @@ int main(int argc, char** argv) {
 
         const std::string kernel_path = "kernel.cl";
 
+        if (repeat < 1) repeat = 1;
+        if (warmup < 0) warmup = 0;
+
         if (run_examples || (text_file.empty() && pattern_arg.empty() && pattern_len < 0)) {
-            run_benchmark_examples(kernel_path, chunk_size, max_results, csv_dir, export_csv);
+            run_benchmark_examples(kernel_path, chunk_size, max_results, csv_dir, export_csv, repeat, warmup);
             return 0;
         }
 
@@ -880,13 +1094,31 @@ int main(int argc, char** argv) {
             pattern = sample_pattern_from_text(text, pattern_len, pattern_offset);
         }
 
-        const auto cpu = run_hc8_cpu(text, pattern, max_results);
+        std::cout << "[CONFIG] repeticoes(warmup+amostras)=" << warmup << "+" << repeat << "\n";
+        std::vector<double> cpu_search_samples, gpu_wall_samples;
+        cpu_search_samples.reserve(static_cast<size_t>(repeat));
+        gpu_wall_samples.reserve(static_cast<size_t>(repeat));
+        CpuRunResult cpu;
+        RunResult gpu;
+        for (int it = 0; it < warmup + repeat; ++it) {
+            cpu = run_hc8_cpu(text, pattern, max_results);
+            gpu = run_hc8_gpu(text, pattern, chunk_size, max_results, kernel_path);
+            if (it >= warmup) {
+                cpu_search_samples.push_back(cpu.search_ms);
+                gpu_wall_samples.push_back(gpu.gpu_wall_ms);
+            }
+        }
+
         print_cpu_log("single-run:cpu", text_file, static_cast<int>(pattern.size()), max_results, cpu);
-
-        const auto gpu = run_hc8_gpu(text, pattern, chunk_size, max_results, kernel_path);
         print_log("single-run:gpu", text_file, static_cast<int>(pattern.size()), chunk_size, max_results, gpu);
-
         compare_and_print(cpu, gpu);
+
+        const Stats css = compute_stats(cpu_search_samples);
+        const Stats gws = compute_stats(gpu_wall_samples);
+        std::cout << std::fixed << std::setprecision(3)
+                  << "[STATS] single-run | CPU search med=" << css.median << "ms (cv=" << css.cv << "%)"
+                  << " | GPU wall med=" << gws.median << "ms (cv=" << gws.cv << "%)"
+                  << " | speedup=" << (gws.median > 0.0 ? css.median / gws.median : 0.0) << "x\n";
 
         if (export_csv) {
             write_run_csv_cpu(csv_dir, "single-run-cpu", text_file, static_cast<int>(pattern.size()), max_results, cpu);

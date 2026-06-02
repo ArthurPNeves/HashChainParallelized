@@ -1,0 +1,288 @@
+\documentclass[12pt]{article}
+
+\usepackage{sbc-template}
+\usepackage{graphicx,url}
+\usepackage[utf8]{inputenc}
+\usepackage{fontenc}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% Configura links clicáveis em azul e numeração nas citações
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\sloppy
+
+\title{Paralelização do algoritmo Hash Chain para busca exata de strings em GPUs via OpenCL}
+
+\author{Arthur Patrocínio Neves\inst{1}}
+
+\address{Pontifícia Universidade Católica de Minas Gerais PUC Minas\\
+    Belo Horizonte MG Brasil
+    \email{apneves@sga.pucminas.br}
+}
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This work parallelizes the Hash Chain exact string matching algorithm on GPU architectures to improve performance, addressing the relevance of efficient pattern matching in data-intensive domains such as bioinformatics and information retrieval, where massive data growth demands parallel computing approaches. The \texttt{hc8} variant was implemented under a hybrid model, with the CPU performing the lightweight preprocessing and the GPU running the parallel search through OpenCL, and was evaluated against the original sequential implementation on the 100\,MB Pizza \& Chilli Corpus using an AMD Radeon RX 9060 XT (RDNA 4). With the text resident in VRAM (\textit{warm} regime), the GPU outperformed the sequential CPU in all 12 scenarios, with speedups from 1.49$\times$ to 4.16$\times$; for an isolated single query (\textit{cold} regime), host-side I/O dominates and the GPU loses, a result that generalizes to any algorithm whose CPU search finishes within a few milliseconds.
+\end{abstract}
+
+\begin{resumo}
+Este trabalho realiza a paralelização do algoritmo de busca exata de strings Hash Chain em arquiteturas GPU para melhorar o desempenho, abordando a relevância da busca eficiente de padrões em áreas como bioinformática e recuperação de informação, nas quais o crescimento massivo dos dados exige abordagens de computação paralela. A variante \texttt{hc8} foi implementada sob um modelo híbrido, em que a CPU realiza o pré-processamento leve e a GPU executa a busca paralela via OpenCL, e foi avaliada frente à implementação sequencial original sobre o \textit{Pizza \& Chilli Corpus} de 100\,MB em uma AMD Radeon RX 9060 XT (RDNA 4). Com o texto residente em VRAM (regime \textit{warm}), a GPU superou a CPU sequencial em todos os 12 cenários, com \textit{speedups} de 1,49$\times$ a 4,16$\times$; para uma consulta única isolada (regime \textit{cold}), o custo de \textit{host I/O} domina e a GPU perde, resultado que se generaliza para qualquer algoritmo cuja busca em CPU conclua em poucos milissegundos.
+\end{resumo}
+
+\section{Introdução}
+
+A busca exata de padrões em sequências é um problema fundamental em áreas como bioinformática e recuperação de informação, com aplicações que vão desde a identificação de genes e motivos biológicos até a indexação de grandes coleções textuais \cite{gusfield1997,navarro2001}. O crescimento acelerado dos conjuntos de dados, impulsionado por avanços em sequenciamento genético e armazenamento digital, exige algoritmos de correspondência de padrões capazes de lidar com grandes volumes de informação de forma eficiente.
+
+Nesse contexto, arquiteturas de processamento massivamente paralelas, como as unidades de processamento gráfico (GPUs), oferecem uma oportunidade promissora para acelerar algoritmos de busca exata. GPUs modernas possuem milhares de núcleos capazes de executar operações simultâneas, tornando-as ideais para tarefas baseadas em processamento intensivo de dados e operações independentes, como o cálculo de funções hash e a verificação de correspondências em textos \cite{ashkiani2016}. A utilização de GPUs em problemas de busca de padrões tem demonstrado ganhos significativos de desempenho, reduzindo o tempo de execução sem comprometer a precisão dos resultados.
+
+O algoritmo \textit{Hash Chain}, proposto por Palmer et al. \cite{palmer2024}, apresenta uma abordagem eficiente para busca exata de strings, baseada em hashing encadeado e reconhecimento de fatores fracos. Embora sua execução sequencial demonstre bom desempenho, ainda não há estudos que explorem sua paralelização em GPUs de arquiteturas recentes utilizando padrões abertos. A investigação dessa possibilidade representa uma lacuna relevante, dado o potencial de aceleração que tais hardwares oferecem.
+
+Assim, o objetivo principal desta monografia é paralelizar o algoritmo Hash Chain para GPUs por meio da API OpenCL, sob um modelo híbrido em que a CPU realiza o pré-processamento leve e a GPU executa a fase de busca massivamente paralela. O trabalho também define e aplica um protocolo experimental para comparar o desempenho entre as versões sequencial e paralela. Os resultados contribuem cientificamente ao identificar em que condições o Hash Chain se beneficia de um ambiente paralelo heterogêneo.
+
+Esta pesquisa pretende, portanto, reduzir a lacuna entre o desempenho do Hash Chain em CPU e o potencial de aceleração oferecido por GPUs, fornecendo bases sólidas para estudos futuros sobre paralelização de algoritmos de busca exata em contextos de grande escala.
+
+\section{Referencial Teórico}
+
+Esta seção apresenta os conceitos fundamentais sobre os quais o trabalho se apoia: a definição do problema de busca exata de strings, o algoritmo \textit{Hash Chain} que é objeto da paralelização e os princípios de computação paralela em GPU e do modelo de programação OpenCL.
+
+\subsection{Busca exata de strings}
+
+O problema da busca exata de strings consiste em, dado um texto $T$ de comprimento $n$ e um padrão $P$ de comprimento $m$ sobre um alfabeto $\Sigma$, encontrar todas as posições de $T$ em que $P$ ocorre integralmente \cite{gusfield1997}. É um problema clássico da Ciência da Computação, com aplicações que vão da indexação de grandes coleções textuais à identificação de motivos biológicos em sequências genômicas \cite{navarro2001}. As abordagens consolidadas dividem-se em algumas famílias: as baseadas em autômatos e em comparação de caracteres (como a família Boyer-Moore), que obtêm desempenho sublinear no caso médio ao deslocar o padrão sobre o texto a cada incompatibilidade; as baseadas em paralelismo de bits, que codificam o estado da busca em palavras de máquina; e as baseadas em \textit{hashing}, como o algoritmo de Rabin-Karp, que comparam impressões digitais (\textit{fingerprints}) de fatores do texto antes de uma verificação exata \cite{gusfield1997,navarro2001}. O \textit{Hash Chain} insere-se nesta última família, mas introduz a ideia de fatores fracos encadeados, detalhada a seguir.
+
+\subsection{O algoritmo Hash Chain}
+
+O \textit{Hash Chain}, proposto por Palmer, Faro e Scafiti \cite{palmer2024} e publicado no Simpósio Internacional de Algoritmos Experimentais (SEA 2024), é um algoritmo recente de busca exata baseado no reconhecimento de \textit{fatores fracos encadeados} (\textit{linked weak factors}). Trata-se da evolução mais recente da linha de \textit{reconhecimento de fatores fracos} (WFR) desenvolvida pelo grupo de Simone Faro — também responsável pela ferramenta de \textit{benchmarking} SMART e por levantamentos de referência na área de busca exata de strings —, o que confere ao algoritmo uma base teórica consolidada. A ideia central é substituir a identificação unívoca de fatores do padrão por um filtro probabilístico barato, no estilo de um filtro de Bloom, cujos falsos positivos são posteriormente eliminados por uma verificação exata. Durante o pré-processamento, o algoritmo constrói um filtro $F$ com $2^{12} = 4096$ entradas, indexado por uma função de \textit{hash} sobre q-gramas (blocos de $Q$ caracteres) do padrão. Cada entrada não armazena apenas a presença do q-grama, mas uma impressão digital do q-grama \textit{seguinte} na cadeia, ligando fatores consecutivos do padrão.
+
+Na fase de busca, o algoritmo lê um q-grama do texto e consulta $F$; se a entrada correspondente estiver marcada, percorre a cadeia para trás, $Q$ bytes por vez, verificando as impressões digitais encadeadas. Apenas quando toda a cadeia é validada o algoritmo realiza uma comparação final caractere a caractere (\texttt{memcmp}) contra o padrão, confirmando ou descartando a ocorrência. Em caso de incompatibilidade, o deslocamento aplicado é $m-Q+1$, o que confere comportamento sublinear no caso médio. Este trabalho concentra-se na variante \texttt{hc8}, que utiliza q-gramas de $Q=8$ bytes, valor que equilibra a seletividade do filtro com o custo de cada consulta.
+
+\subsection{Computação paralela em GPU e o modelo OpenCL}
+
+Unidades de processamento gráfico (GPUs) seguem um modelo de execução massivamente paralelo, no qual milhares de núcleos executam a mesma instrução sobre dados distintos (SIMT/SIMD). O modelo de programação OpenCL \cite{khronos2012} abstrai esse hardware em um \textit{host} (a CPU, que orquestra a execução) e um ou mais \textit{devices} (a GPU, que executa funções chamadas \textit{kernels}). A computação é organizada em um espaço de índices (\textit{NDRange}) cujos elementos, os \textit{work-items}, são agrupados em \textit{workgroups}; os \textit{work-items} de um mesmo \textit{workgroup} compartilham uma região de \textbf{memória local} de baixa latência, distinta da \textbf{memória global} (a VRAM) e da memória privada de cada \textit{work-item} \cite{kaeli2015}. Diferentemente de plataformas proprietárias como CUDA, o OpenCL é um padrão aberto, portável entre fabricantes (AMD, Intel, NVIDIA), o que motiva sua adoção neste trabalho sobre uma GPU AMD.
+
+Dois aspectos arquiteturais são determinantes para o desempenho. Primeiro, a \textbf{divergência de fluxo}: os \textit{work-items} são escalonados em lotes (\textit{wavefronts} na terminologia da AMD, \textit{warps} na NVIDIA) que executam em \textit{lockstep}; instruções condicionais (\textit{branching}) que levam \textit{work-items} do mesmo lote a caminhos distintos serializam a execução, degradando a vazão. Segundo, o \textbf{padrão de acesso à memória}: leituras da memória global são ordens de magnitude mais lentas que da memória local, de modo que carregar cooperativamente dados reutilizados (como o filtro $F$) na memória local antes do laço de busca é uma otimização crítica. No contexto de busca de padrões, a estratégia fundamental é o \textbf{paralelismo de dados}: o texto é particionado em segmentos processados simultaneamente, com tratamento da \textit{condição de fronteira} — uma ocorrência que cruza a junção entre dois segmentos — pela extensão da janela de cada unidade em $m-1$ caracteres \cite{ashkiani2016}. O co-design de estruturas de dados para a arquitetura da GPU, como o \textit{q-group index} para mapeamento de leituras genômicas, que reduz a pegada de memória e evita ramificações por meio de operações bit-a-bit \cite{koster2014}, ilustra a filosofia de adaptar a estrutura ao hardware — diretamente relevante para o filtro de Bloom estendido do \textit{Hash Chain}.
+
+\section{Trabalhos Correlatos}
+
+Esta seção apresenta cinco trabalhos contemporâneos (publicados nos últimos cinco anos) que, em diferentes graus, paralelizam algoritmos de busca ou correspondência em GPU. Cada um é descrito e contrastado metodologicamente com o presente trabalho — quanto ao algoritmo paralelizado, à plataforma (CUDA ou OpenCL), ao modelo de execução (totalmente em GPU ou híbrido CPU/GPU), ao número de padrões e à natureza da busca (exata ou aproximada) —, sem comparação de resultados numéricos, dada a heterogeneidade de hardware, bases e métricas entre os estudos.
+
+O trabalho mais próximo é o \textbf{CUSMART} \cite{ozsoy2025}, que paraleliza em CUDA a biblioteca SMART, incorporando versões para GPU de 64 algoritmos de busca exata e explorando otimizações genéricas de paralelização. Difere deste trabalho em dois eixos: prioriza a amplitude (uma suíte inteira de algoritmos) sobre a profundidade, ao passo que este trabalho aprofunda a paralelização de um único algoritmo recente — o \textit{Hash Chain}, ausente daquela suíte —, e adota a plataforma proprietária CUDA/NVIDIA, enquanto aqui se emprega o padrão aberto OpenCL sobre GPU AMD.
+
+No domínio de sistemas de detecção de intrusão (NIDS), Abbas et al. \cite{abbas2024-rabinkarp} propõem uma variante \textit{sem colisões} do Rabin-Karp, baseada em um conjunto de múltiplas funções de \textit{hash} polinomiais cuja probabilidade conjunta de colisão é desprezível, eliminando a verificação caractere a caractere — um passo sequencial e limitante. Tal como o \textit{Hash Chain}, é uma busca baseada em \textit{hashing} em GPU, mas opera em regime multi-padrão e abre mão da verificação exata, ao passo que o \textit{Hash Chain} é mono-padrão e mantém a verificação por \texttt{memcmp} após a validação da cadeia de fatores fracos.
+
+Ainda em NIDS, Abbas et al. \cite{abbas2024-ahocorasick} atacam a explosão de memória do autômato de Aho-Corasick em GPU por meio de uma variação que comprime e indexa por \textit{hashing} a tabela de transições, permitindo escalar para um número muito maior de padrões dentro das restrições de VRAM. O ponto de contato é o uso de \textit{hashing} como mecanismo de compactação de uma estrutura de busca; o contraste está no paradigma (autômato multi-padrão \textit{versus} filtro de fatores fracos mono-padrão) e no foco em capacidade de memória, e não em vazão de varredura.
+
+Dois trabalhos exemplificam o modelo \textbf{híbrido CPU/GPU} adotado neste trabalho, ainda que em domínios distintos da busca exata de texto. O \textbf{WFA-GPU} \cite{aguado-puig2023} acelera o alinhamento par-a-par \textit{gap-affine} de sequências genômicas (busca aproximada) com o algoritmo \textit{wavefront}, mantendo o controle na CPU e delegando o núcleo paralelo à GPU. O \textbf{FusionANNS} \cite{tian2025} realiza busca vetorial aproximada (ANN) em escala de bilhões de vetores por meio de filtragem e reordenação colaborativas entre CPU e GPU. Ambos reforçam a tendência de delegar à CPU o controle e o pré-processamento e à GPU a fase massivamente paralela — exatamente a divisão de tarefas empregada aqui —, mas tratam de busca aproximada, enquanto este trabalho aborda correspondência exata.
+
+A Tabela \ref{tab:correlatos} sintetiza o posicionamento metodológico desses trabalhos frente ao presente trabalho.
+
+\begin{table}[htbp]
+\centering
+\caption{Posicionamento metodológico dos trabalhos correlatos frente a este trabalho.}
+\label{tab:correlatos}
+\footnotesize
+\begin{tabular}{|l|c|p{3.0cm}|c|c|c|c|}
+\hline
+\textbf{Trabalho} & \textbf{Ano} & \textbf{Algoritmo / problema} & \textbf{Plat.} & \textbf{Modelo} & \textbf{Padrões} & \textbf{Tipo} \\ \hline
+CUSMART \cite{ozsoy2025}              & 2025 & Suíte SMART (64 algoritmos)        & CUDA   & GPU     & multi & exato  \\ \hline
+RK sem colisão \cite{abbas2024-rabinkarp} & 2024 & Rabin-Karp multi-\textit{hash} (NIDS) & CUDA   & GPU     & multi & exato  \\ \hline
+A-C comprimido \cite{abbas2024-ahocorasick} & 2024 & Aho-Corasick hasheado (NIDS)     & CUDA   & GPU     & multi & exato  \\ \hline
+WFA-GPU \cite{aguado-puig2023}        & 2023 & Alinhamento \textit{gap-affine}    & CUDA   & híbrido & ---   & aprox. \\ \hline
+FusionANNS \cite{tian2025}            & 2025 & Busca vetorial ANN                 & CUDA   & híbrido & ---   & aprox. \\ \hline
+\textbf{Este trabalho}                & 2026 & Hash Chain (fatores fracos)        & \textbf{OpenCL} & híbrido & mono & exato \\ \hline
+\end{tabular}
+\end{table}
+
+Em síntese, a paralelização de busca de padrões aponta para arquiteturas híbridas, gestão inteligente da memória e o co-design de algoritmos e estruturas de dados. Entretanto, como evidencia a Tabela \ref{tab:correlatos}, nenhum dos trabalhos correlatos paraleliza o \textit{Hash Chain}, e a maioria emprega a plataforma proprietária CUDA. Sendo o \textit{Hash Chain} um algoritmo recente, estruturado em \textit{hashing} e ainda não investigado em ecossistemas de padrão aberto, ele se apresenta como um candidato promissor para aceleração — lacuna que este trabalho visa preencher.
+
+\section{Metodologia}
+
+Este capítulo detalha a infraestrutura computacional, a estratégia de paralelização proposta para o algoritmo \textit{Hash Chain} utilizando OpenCL e o protocolo experimental adotado para a validação dos resultados.
+
+\subsection{Materiais e Ferramentas}
+
+Para a avaliação de desempenho e validação do modelo, os experimentos foram realizados em uma GPU \textbf{AMD Radeon™ RX 9060 XT} (Arquitetura RDNA 4). O ambiente de software foi baseado no sistema operacional \textbf{Windows}, utilizando a linguagem \textbf{C/C++} para o código hospedeiro (\textit{Host}) e a linguagem \textbf{OpenCL C} para o código do dispositivo (\textit{Device}), garantindo a portabilidade da solução.
+
+O desenvolvimento e a compilação utilizaram bibliotecas padrão C/C++ integradas aos cabeçalhos e bibliotecas do OpenCL disponíveis no driver da AMD. Os testes de desempenho utilizaram os arquivos padronizados do \textit{Pizza \& Chilli Corpus} (DNA, Proteínas e Texto em Inglês).
+
+\subsection{Proposta de Paralelização}
+
+A adaptação do algoritmo seguiu o modelo de \textbf{Paralelismo de Dados} com execução heterogênea. A CPU ficou responsável pelo pré-processamento leve, calculando a tabela de \textit{Hash} e o filtro de Bloom ($F$), enquanto a GPU assumiu a carga intensiva de busca através da submissão de \textit{kernels} via OpenCL. O Algoritmo \ref{alg:proposta} ilustra a lógica de divisão de tarefas.
+
+\begin{algorithm}
+\caption{Proposta de Paralelização do Hash Chain em OpenCL (CPU + GPU)}
+\label{alg:proposta}
+\begin{algorithmic}[1]
+\Require Texto $T$ (tamanho $N$), Padrão $P$ (tamanho $M$)
+\Ensure Posições das ocorrências de $P$ em $T$
+
+\Statex \textbf{HOST (CPU):}
+\State Calcular tabela de Hash $H$ e Filtro de Bloom $F$ para $P$
+\State Alocar \textit{buffers} OpenCL e copiar $T$ e $F$ para a memória global da GPU
+\State Definir o espaço de índice global (Global Work Size): $N / ChunkSize$
+
+\Statex \textbf{DEVICE (GPU) - Kernel de Busca em OpenCL:}
+\ForAll{Work-item $idx$ em paralelo}
+    \State Carregar fragmento de $F$ para \textbf{Memória Local (Local Memory)}
+    \State Definir janela do work-item: $inicio \leftarrow idx \times ChunkSize$
+    \State \textbf{Aplicar Overlap:} $fim \leftarrow inicio + ChunkSize + M - 1$
+    
+    \While{$posicao < fim$}
+        \State Calcular hash $v$ do q-grama atual
+        \If{$F[v] \neq 0$} \Comment{Verificação rápida}
+            \State Executar verificação da cadeia de hashes (Loop reverso)
+            \If{Cadeia válida}
+                \State Verificar caractere a caractere e salvar ocorrência
+            \EndIf
+        \EndIf
+        \State $posicao \leftarrow posicao + Salto(M, q)$
+    \EndWhile
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+O texto foi particionado em blocos fixos, onde cada \textit{work-item} processa um segmento independente. Para mitigar a latência de acesso à memória global, o vetor $F$ foi carregado na \textbf{Memória Local} compartilhada pelos \textit{work-items} do mesmo \textit{workgroup}. O tratamento de fronteiras foi realizado via técnica de overlap, estendendo a busca em $m-1$ posições. Inicialmente, a divergência de controle causada pelas instruções condicionais (\textit{branching}) dentro dos \textit{Wavefronts} da arquitetura AMD foi tratada de forma ingênua, priorizando a corretude geométrica da solução.
+
+\subsection{Protocolo Experimental e Análise}
+
+A validação do método consistiu na comparação direta entre a versão paralela proposta em OpenCL e a implementação sequencial original rodando exclusivamente na CPU. Para garantir significância estatística, cada experimento foi repetido múltiplas vezes. As seguintes métricas foram definidas para a avaliação:
+
+\begin{itemize}
+    \item \textbf{Tempo de Execução e Speedup:} Comparação do tempo total ($T_{total}$) e o ganho de velocidade em função do tamanho do padrão e do texto. Eventos de \textit{profiling} nativos do OpenCL foram usados para medir o tempo de execução do \textit{kernel} isolado do tempo de transferência do barramento PCIe.
+    \item \textbf{Taxa de Colisões:} Frequência de falsos positivos na etapa de filtragem, monitorando o número de verificações desnecessárias que causam divergência nos \textit{Wavefronts}.
+    \item \textbf{Vazão (Throughput):} Quantidade de dados processados por segundo (MB/s ou GB/s).
+    \item \textbf{Consumo Energético e Ocupação:} Monitoramento do consumo e da eficiência utilizando ferramentas do ecossistema AMD, como o \textit{Radeon Developer Tool Suite} (RDTS) ou APIs de telemetria compatíveis com Windows, avaliando se a aceleração compensa o custo energético da GPU.
+\end{itemize}
+
+A corretude foi assegurada comparando as saídas das duas versões, garantindo que a paralelização não introduziu falsos positivos ou negativos.
+
+\section{Implementações, Testes, Resultados e Análises}
+\label{sec:resultados}
+
+Esta seção descreve a implementação final do protótipo, o protocolo de testes adotado, os resultados experimentais coletados na GPU AMD Radeon RX 9060 XT (RDNA 4) e a análise crítica das observações. A trajetória da implementação foi orientada por um princípio metodológico estabelecido durante a fase experimental: \textit{antes de otimizar, é preciso medir corretamente}. Esse princípio levou a uma reformulação dos próprios instrumentos de medição empregados em iterações anteriores deste trabalho e, consequentemente, à revisão do diagnóstico apresentado na fase preliminar.
+
+\subsection{Implementação}
+\label{sec:impl}
+
+O código hospedeiro foi escrito em C++17 e o código de dispositivo em OpenCL C 1.2, conforme previsto na metodologia. A divisão de tarefas seguiu fielmente o Algoritmo \ref{alg:proposta}: a CPU constrói o filtro $F$ e o \textit{hash} final $H_m$ via \texttt{preprocessing\_hc8} a GPU executa o laço de busca paralelo sobre o texto particionado em blocos de 256\,KiB.
+
+Três iterações de implementação foram conduzidas, cada uma motivada por uma observação derivada da iteração anterior.
+
+\textbf{(i) Instrumentação de medição honesta.} A primeira versão funcional reportava o tempo total da GPU como a soma dos eventos nativos de \textit{profiling} do OpenCL das três etapas: H2D (\textit{host-to-device}), \textit{kernel} e D2H (\textit{device-to-host}). Esta foi a metodologia empregada na fase preliminar deste trabalho e que sustentou as conclusões iniciais. Entretanto, ao confrontar os números reportados com a física do barramento PCIe~4.0~$\times$16 (cuja largura de banda efetiva mínima implica em $\sim$5\,ms para uma transferência de 100\,MB), observou-se que o campo \texttt{h2d\_ms} reportava sistematicamente $0{,}000$\,ms para todas as execuções  um valor fisicamente impossível.
+
+A causa-raiz foi identificada: na implementação do \textit{driver} AMD para Windows, a chamada \texttt{clGetEventProfilingInfo} sobre eventos retornados por \texttt{clEnqueueWriteBuffer} no modo não-bloqueante a partir de memória de \textit{host} paginável devolve \texttt{START} igual a \texttt{END}, anulando silenciosamente o tempo medido. Isso significa que, na fase preliminar, o denominador da fórmula de \textit{speedup} ($T_{CPU}/T_{GPU}$) correspondia apenas ao tempo de execução do \textit{kernel}, e não ao tempo total efetivo de operação da GPU. Para corrigir o problema, foi adicionada uma medição complementar via \texttt{std::chrono::high\_resolution\_clock} envolvendo toda a sequência GPU  da criação do contexto OpenCL ao último \texttt{clWaitForEvents} de leitura  registrada na nova coluna \texttt{gpu\_wall\_ms}. Esta passou a ser a métrica oficial deste trabalho.
+
+\textbf{(ii) Suspensão do contexto OpenCL e \textit{cache} de \textit{buffers} de texto.} Com a medição corrigida, observou-se que, em vez dos esperados 5--6\,ms de PCIe, cada chamada a \texttt{run\_hc8\_gpu} pagava um custo fixo de aproximadamente 110\,ms. A investigação revelou que esse custo provinha da rotina \texttt{create\_opencl}, que era invocada em toda chamada e reconstruía o contexto, a fila de comandos, o programa OpenCL e o \textit{kernel}. Um cenário de \textit{benchmark} típico, com cinco padrões diferentes sendo buscados no mesmo texto em inglês, pagava esse custo cinco vezes. A solução foi suspender (\textit{hoist}) a criação do contexto para fora do laço de execuções e introduzir um \textit{cache} \texttt{std::map<std::string, CachedText>}, indexado pelo caminho do arquivo, contendo o \texttt{cl\_mem} do texto previamente carregado. A primeira execução com um dado texto paga o custo de leitura e transferência; execuções subsequentes contra o mesmo texto reutilizam o \textit{buffer} residente em VRAM.
+
+\textbf{(iii) Transferência via memória de \textit{host} fixada.} Mesmo com a suspensão do contexto, a primeira transferência de cada texto permanecia custosa ($\sim$120--175\,ms). O caminho original  \texttt{clEnqueueWriteBuffer} a partir de um \texttt{std::vector} alocado em memória paginável  impede que o \textit{driver} aplique DMA direto, exigindo que o sistema operacional (\textit{pin}) páginas a cada chamada. A solução clássica em OpenCL é o padrão de \textit{pinned staging}: aloca-se um \textit{buffer}, mapeia-se o ponteiro para o espaço do hospedeiro, copia-se o conteúdo do \textit{vector} para a região fixada com \texttt{memcpy}, desmapeia-se com \texttt{clEnqueueUnmapMemObject} e dispara-se o DMA por meio de \texttt{clEnqueueCopyBuffer}. Após esta refatoração, o evento de cópia passou a reportar valores fisicamente coerentes.
+
+
+\subsection{Protocolo de Testes}
+\label{sec:protocolo}
+
+A bateria final de testes utilizou as três bases canônicas do \textit{Pizza~\&~Chilli Corpus} em sua versão de 100\,MB (DNA, Inglês e Proteínas) e cobriu exaustivamente cinco tamanhos de padrão por base ($m \in \{8, 16, 32, 64, 128\}$), totalizando 15 cenários. Os padrões foram amostrados a partir de \textit{offsets} fixos do próprio texto, garantindo que cada cenário possua ao menos uma ocorrência verificável.
+
+A ordem de execução foi deliberadamente projetada para isolar dois regimes de uso distintos: as três primeiras execuções correspondem à \textit{primeira aparição} de cada arquivo de texto (regime \textit{cold}), pagando integralmente os custos de leitura de disco, fixação de memória e transferência DMA; as doze execuções subsequentes correspondem a buscas adicionais sobre textos já residentes em VRAM (regime \textit{warm}), que se beneficiam do \textit{cache} introduzido em \S\ref{sec:impl}. Essa separação reflete dois cenários reais distintos: a busca isolada de uma única consulta sobre um texto recém-recebido versus o uso típico de um serviço de indexação ou de uma \textit{pipeline} de bioinformática, no qual múltiplas consultas são executadas contra o mesmo texto.
+
+A corretude foi verificada em todas as 15 execuções. Para cada cenário, as duas implementações  a sequencial e a paralela foram executadas e seus vetores de índices ordenados foram comparados elemento a elemento. O contrato \texttt{same\_total~$\wedge$~same\_overflow~$\wedge$~same\_indices} foi satisfeito em $15/15$ cenários, validando que nenhuma das otimizações descritas em \S\ref{sec:impl} introduziu falsos positivos ou falsos negativos. A presença simultânea da rotina sequencial e da rotina paralela na mesma execução também garante que a \textit{harness} de regressão acompanha cada coleta de \textit{benchmark}.
+
+Para cada execução, foram registradas: o tempo de busca sequencial na CPU, os tempos de profiling de eventos do OpenCL e o tempo de parede da GPU. O \textit{speedup} reportado utiliza exclusivamente o tempo de parede como denominador, em conformidade com a discussão de \S\ref{sec:impl}.
+
+\subsection{Resultados}
+\label{sec:resultados-tab}
+
+A Tabela \ref{tab:resultados-sweep} consolida os resultados da bateria final, separando os cenários por regime (\textit{cold} para a primeira aparição de cada texto, \textit{warm} para as buscas subsequentes). A Figura \ref{fig:speedup} apresenta visualmente os mesmos números na forma de gráfico de barras agrupadas por base.
+
+\begin{table}[htbp]
+\centering
+\caption{Resultados da bateria de \textit{benchmarks} sobre \textit{Pizza \& Chilli Corpus} (100\,MB), GPU AMD Radeon RX 9060 XT (RDNA 4). Tempos em milissegundos. \textit{Speedup} = $T_{CPU,\, search} / T_{GPU,\, wall}$.}
+\label{tab:resultados-sweep}
+\small
+\begin{tabular}{|l|c|c|c|c|c|}
+\hline
+\textbf{Base} & \textbf{$m$} & \textbf{Regime} & \textbf{CPU \textit{search} (ms)} & \textbf{GPU \textit{wall} (ms)} & \textbf{Speedup} \\ \hline
+DNA      &  16 & cold &  11{,}7 &  66{,}8 & 0{,}17$\times$ \\ \hline
+DNA      &   8 & warm &  94{,}4 &  26{,}1 & \textbf{3{,}61$\times$} \\ \hline
+DNA      &  32 & warm &   4{,}6 &   2{,}5 & \textbf{1{,}84$\times$} \\ \hline
+DNA      &  64 & warm &   3{,}8 &   1{,}4 & \textbf{2{,}66$\times$} \\ \hline
+DNA      & 128 & warm &   2{,}8 &   0{,}9 & \textbf{3{,}11$\times$} \\ \hline
+Inglês   &  64 & cold &   4{,}2 &  59{,}7 & 0{,}07$\times$ \\ \hline
+Inglês   &   8 & warm & 101{,}5 &  24{,}4 & \textbf{4{,}16$\times$} \\ \hline
+Inglês   &  16 & warm &  12{,}3 &   8{,}3 & \textbf{1{,}49$\times$} \\ \hline
+Inglês   &  32 & warm &   5{,}7 &   2{,}2 & \textbf{2{,}63$\times$} \\ \hline
+Inglês   & 128 & warm &   3{,}4 &   0{,}9 & \textbf{3{,}62$\times$} \\ \hline
+Proteínas &  32 & cold &   5{,}2 &  95{,}5 & 0{,}05$\times$ \\ \hline
+Proteínas &   8 & warm & 102{,}8 &  25{,}1 & \textbf{4{,}10$\times$} \\ \hline
+Proteínas &  16 & warm &  12{,}9 &   5{,}3 & \textbf{2{,}41$\times$} \\ \hline
+Proteínas &  64 & warm &   4{,}1 &   2{,}0 & \textbf{2{,}05$\times$} \\ \hline
+Proteínas & 128 & warm &   3{,}3 &   1{,}3 & \textbf{2{,}45$\times$} \\ \hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[htpb]
+    \centering
+    \includegraphics[width=0.85\textwidth]{fig1_speedup.pdf}
+    \caption{\textit{Speedup} do algoritmo Hash Chain (CPU sequencial vs. GPU OpenCL) por base e tamanho de padrão. A linha tracejada em $1{,}0\times$ indica o ponto de empate.}
+    \label{fig:speedup}
+\end{figure}
+
+A Figura \ref{fig:tempos-absolutos} mostra os tempos absolutos de CPU e GPU em escala logarítmica, evidenciando que a GPU é consistentemente mais rápida no regime \textit{warm} mesmo quando o tempo absoluto da CPU já é inferior a 5\,ms. A Figura \ref{fig:memoria}, por fim, decompõe o tempo de GPU em suas três etapas (H2D, \textit{kernel}, D2H), agora reportadas com fidelidade após a refatoração descrita em \S\ref{sec:impl}.
+
+\begin{figure}[htpb]
+    \centering
+    \includegraphics[width=0.85\textwidth]{fig2_tempos_absolutos.pdf}
+    \caption{Tempos absolutos de execução (escala logarítmica) por base e tamanho de padrão. Linhas: CPU sequencial e GPU OpenCL (tempo de parede).}
+    \label{fig:tempos-absolutos}
+\end{figure}
+
+\begin{figure}[htpb]
+    \centering
+    \includegraphics[width=0.85\textwidth]{fig3_memoria_gpu.pdf}
+    \caption{Decomposição do tempo de execução na GPU em transferência H2D, \textit{kernel} e transferência D2H, após a correção do esquema de medição (\S\ref{sec:impl}).}
+    \label{fig:memoria}
+\end{figure}
+
+Em síntese: \textbf{a GPU venceu a CPU sequencial em $12$ dos $12$ cenários do regime \textit{warm}, com \textit{speedups} entre $1{,}49\times$ e $4{,}16\times$}; e \textbf{perdeu nos $3$ cenários do regime \textit{cold}, com fatores entre $0{,}05\times$ e $0{,}17\times$}. O custo fixo de inicialização do contexto OpenCL, pago uma única vez por processo, foi medido em $\sim$213\,ms.
+
+\subsection{Análise}
+\label{sec:analise}
+
+Os resultados sustentam quatro observações que atualizam o diagnóstico da fase preliminar.
+
+\textbf{1. Corretude preservada.} O contrato de igualdade dos vetores de ocorrências entre as versões sequencial e paralela foi satisfeito em $15/15$ cenários sobre 100\,MB.
+
+\textbf{2. A medição correta alterou o diagnóstico.} A fase preliminar atribuía o gargalo à transferência H2D, mas tal conclusão decorria de um artefato do \textit{profiling} do OpenCL no \textit{driver} AMD. Com tempo-de-parede honesto, o DMA real custa apenas $\sim$4\,ms, valor pequeno frente à janela de 100--175\,ms do regime \textit{cold}.
+
+\textbf{3. Regime \textit{warm}: vitória decisiva da GPU.} A GPU vence em todos os pares (base, $m$) com texto residente em VRAM. Os maiores ganhos ocorrem em $m$ pequenos, nos quais a CPU realiza mais trabalho ($>3{,}5\times$); em $m$ grandes a vantagem cai para $2$--$3\times$, ainda consistente. O padrão se mantém para alfabetos pequenos (DNA e Proteínas), contrariando a expectativa preliminar.
+
+\textbf{4. Regime \textit{cold}: derrota estrutural por \textit{host I/O}.} A janela de $\sim$95--175\,ms decompõe-se em $\sim$50--80\,ms de leitura de arquivo, $\sim$20--30\,ms de fixação de páginas, $\sim$30--50\,ms de \texttt{memcpy} para a região fixada, $\sim$4\,ms de DMA e $\sim$4\,ms de \textit{kernel} e \textit{readback}. As parcelas \textit{host-side} respondem por $97$--$98\%$ do tempo. Otimizações no \textit{kernel} ou no esquema de transferência (Passos IV e V) não movem esse piso.
+
+Em síntese, a paralelização do Hash Chain em GPU é vantajosa sempre que o custo de transferência do texto é amortizado sobre múltiplas consultas  regime típico de serviços de indexação e \textit{pipelines} de bioinformática. Para consulta única isolada, o custo de \textit{host I/O} sobrepõe a aceleração do \textit{kernel}, resultado que se generaliza para qualquer algoritmo cuja CPU conclua a busca em poucos milissegundos.
+
+\section{Conclusão}
+\label{sec:conclusao}
+
+Este trabalho teve como objetivo paralelizar o algoritmo de busca exata de strings \textit{Hash Chain}, em sua variante \texttt{hc8}, para execução em GPU por meio da API de padrão aberto OpenCL, adotando um modelo híbrido em que a CPU realiza o pré-processamento leve — a construção do filtro de fatores fracos $F$ e do \textit{hash} final — e a GPU executa a fase de busca massivamente paralela sobre o texto particionado. Buscou-se, sobretudo, determinar em que condições a implementação paralela em GPU supera a versão sequencial original em CPU, comparando ambas sobre as três bases canônicas do \textit{Pizza \& Chilli Corpus} de 100\,MB.
+
+Os experimentos confirmaram a hipótese de aceleração, porém de forma condicional. Com o texto residente na memória da GPU (regime \textit{warm}), a versão paralela superou a sequencial em todos os 12 cenários avaliados, com \textit{speedups} de $1{,}49\times$ a $4{,}16\times$, mantendo a vantagem inclusive para alfabetos pequenos como DNA e Proteínas. Já na primeira consulta a um texto recém-carregado (regime \textit{cold}), o custo de \textit{host I/O} — leitura de disco, fixação de páginas e cópia para a memória fixada — domina o tempo total e a GPU é superada pela CPU. Um achado metodológico relevante foi que a correção do instrumento de medição, com a adoção do tempo de parede em lugar de eventos de \textit{profiling} enganosos do \textit{driver}, reposicionou o gargalo antes atribuído à transferência PCIe para o \textit{host I/O}, retificando o diagnóstico da fase preliminar. A corretude foi preservada nos 15 cenários, confirmando que as otimizações não introduziram falsos positivos ou negativos.
+
+Como direcionamentos futuros, vislumbram-se quatro frentes. A primeira é a redução do piso de \textit{host I/O} no regime \textit{cold}, por meio de leitura mapeada em memória (\textit{memory-mapped I/O}), \textit{buffers} persistentes e sobreposição da transferência com a computação. A segunda é a extensão do modelo para a busca multi-padrão e a paralelização da própria fase de pré-processamento, ainda sequencial. A terceira é a generalização da estratégia para outras variantes da família \textit{Hash Chain}, como a \textit{Linear} e a \textit{Sentinel}, e o porte para outras plataformas e APIs, incluindo CUDA, viabilizando uma comparação de portabilidade entre fabricantes. Por fim, propõe-se um estudo de eficiência energética e de ocupação da GPU — métrica prevista no protocolo, mas ainda não reportada —, avaliando se o ganho de desempenho compensa o custo energético frente à execução em CPU.
+
+%%%%%%%%%%%%%%%%%%%%
+%%  BIBLIOGRAFIA  %%
+%%%%%%%%%%%%%%%%%%%%
+
+\newpage
+\bibliographystyle{unsrt}
+\bibliography{sbc-template}
+
+\end{document}
