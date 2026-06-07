@@ -24,6 +24,13 @@ CV_WARN = 15.0  # avisa se algum coeficiente de variação ultrapassar este valo
 ORDEM_BASES = ["DNA", "English", "Proteins", "Outros"]
 
 
+def vazao_gbs(text_bytes: float, ms: float) -> float:
+    """Vazão efetiva em GB/s (GB = 1e9 bytes): N/T. bytes / ms / 1e6 == bytes/(s)/1e9."""
+    if text_bytes and text_bytes > 0 and ms and ms > 0:
+        return float(text_bytes) / float(ms) / 1e6
+    return float("nan")
+
+
 def achar_timings_csv(input_path: Path) -> Path:
     """Retorna o timings_*.csv mais recente (ou o próprio arquivo, se for um)."""
     if input_path.is_file():
@@ -241,17 +248,95 @@ def grafico_decomposicao(df: pd.DataFrame, out_dir: Path) -> None:
     plt.close(fig)
 
 
+def grafico_vazao(df: pd.DataFrame, out_dir: Path) -> None:
+    """fig4 (H2 §4.3): vazão efetiva (N/T, GB/s) no regime warm, CPU vs GPU por base e m.
+
+    É vazão *efetiva* (texto/tempo): como o Hash Chain desloca de forma sublinear e, no warm,
+    o texto já reside em VRAM, a vazão da GPU em m grande ultrapassa a banda do PCIe — por isso
+    o eixo y é logarítmico (faixa de ~0,5 a ~60 GB/s)."""
+    if "text_bytes" not in df.columns:
+        return
+    warm = df[df["regime"] == "warm"].copy()
+    bases = _bases_presentes(warm)
+    if not bases:
+        return
+    fig, axes = plt.subplots(1, len(bases), figsize=(5.5 * len(bases), 4.8), sharey=True)
+    if len(bases) == 1:
+        axes = [axes]
+
+    for ax, base in zip(axes, bases):
+        d = warm[warm["base"] == base].sort_values("pattern_len")
+        ms = d["pattern_len"].to_numpy()
+        x = np.arange(len(ms))
+        v_cpu = [vazao_gbs(tb, t) for tb, t in zip(d["text_bytes"], d["cpu_search_ms_median"])]
+        v_gpu = [vazao_gbs(tb, t) for tb, t in zip(d["text_bytes"], d["gpu_query_wall_ms_median"])]
+        ax.bar(x - 0.2, v_cpu, 0.4, label="CPU sequencial", color="#386cb0",
+               edgecolor="black", linewidth=0.4)
+        ax.bar(x + 0.2, v_gpu, 0.4, label="GPU OpenCL", color="#7fc97f",
+               edgecolor="black", linewidth=0.4)
+        ax.set_yscale("log")
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(int(m)) for m in ms])
+        ax.set_xlabel("Tamanho do Padrão ($m$)")
+        ax.set_title(f"Base: {base}")
+        ax.grid(True, which="both", axis="y", linestyle="--", alpha=0.35)
+
+    axes[0].set_ylabel("Vazão efetiva (GB/s, escala log)")
+    axes[0].legend(loc="upper left", fontsize=9, framealpha=0.9)
+    fig.suptitle("Vazão efetiva no regime warm ($N/T$): CPU sequencial vs GPU OpenCL", y=1.02)
+    fig.tight_layout()
+    fig.savefig(out_dir / "fig4_vazao.pdf", format="pdf", bbox_inches="tight")
+    plt.close(fig)
+
+
+def grafico_colisoes(df: pd.DataFrame, out_dir: Path) -> None:
+    """fig5 (H2 §4.3): taxa de colisões do filtro $F$ no regime warm.
+
+    Painel esquerdo: FP do filtro (candidatos que não são ocorrências). Painel direito: FP do
+    memcmp (candidatos que passam pelo hash final $H_m$ mas não casam). São "verificações
+    desnecessárias" — ligadas à divergência de wavefront da §3.3."""
+    if "filter_candidates" not in df.columns:
+        return
+    warm = df[df["regime"] == "warm"].copy()
+    bases = _bases_presentes(warm)
+    if not bases:
+        return
+    cores = dict(zip(ORDEM_BASES, sns.color_palette("Set2", len(ORDEM_BASES))))
+    ms = sorted(warm["pattern_len"].unique())
+    x = np.arange(len(ms))
+    largura = 0.8 / max(len(bases), 1)
+
+    def fp(col_num: str, sub: pd.DataFrame) -> np.ndarray:
+        cand = sub[col_num].to_numpy(dtype=float)
+        mtc = sub["matches"].to_numpy(dtype=float)
+        return np.where(cand > 0, (cand - mtc) / np.maximum(cand, 1.0) * 100.0, 0.0)
+
+    fig, (ax_f, ax_m) = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+    for ax, col, titulo in ((ax_f, "filter_candidates", "FP do filtro $F$ (%)"),
+                            (ax_m, "memcmp_calls", "FP do memcmp (%)")):
+        for i, base in enumerate(bases):
+            sub = warm[warm["base"] == base].set_index("pattern_len").reindex(ms).reset_index()
+            ax.bar(x + i * largura, fp(col, sub), largura, label=base, color=cores[base],
+                   edgecolor="black", linewidth=0.4)
+        ax.set_xticks(x + largura * (len(bases) - 1) / 2)
+        ax.set_xticklabels([str(int(m)) for m in ms])
+        ax.set_xlabel("Tamanho do Padrão ($m$)")
+        ax.set_title(titulo)
+        ax.grid(True, axis="y", linestyle="--", alpha=0.35)
+    ax_f.set_ylabel("Falsos positivos (%)")
+    ax_f.legend(title="Base")
+    fig.suptitle("Taxa de colisões do filtro de fatores fracos (regime warm)", y=1.02)
+    fig.tight_layout()
+    fig.savefig(out_dir / "fig5_colisoes.pdf", format="pdf", bbox_inches="tight")
+    plt.close(fig)
+
+
 def imprimir_tabela(df: pd.DataFrame) -> None:
     def linha(vals):
         return "| " + " | ".join(str(v) for v in vals) + " |"
 
-    # H2 (§4.3): vazão (Throughput) = bytes do texto / tempo. GB com GB = 1e9 bytes.
+    # H2 (§4.3): vazão (Throughput) = bytes do texto / tempo (ver vazao_gbs no módulo).
     tem_vazao = "text_bytes" in df.columns
-
-    def vazao_gbs(text_bytes: float, ms: float) -> float:
-        if text_bytes and text_bytes > 0 and ms and ms > 0:
-            return float(text_bytes) / float(ms) / 1e6  # bytes / ms / 1e6 == bytes/(s)/1e9
-        return float("nan")
 
     print("\n## Tabela — regime WARM (mediana ± CV%)\n")
     hdr = ["Base", "m", "CPU search (ms)", "GPU wall (ms)", "Speedup"]
@@ -333,11 +418,17 @@ def main() -> None:
     grafico_speedup(df, out_dir)
     grafico_tempos_absolutos(df, out_dir)
     grafico_decomposicao(df, out_dir)
+    grafico_vazao(df, out_dir)
+    grafico_colisoes(df, out_dir)
 
     print("\nArquivos gerados:")
     print(f"- {out_dir / 'fig1_speedup.pdf'}")
     print(f"- {out_dir / 'fig2_tempos_absolutos.pdf'}")
     print(f"- {out_dir / 'fig3_memoria_gpu.pdf'}")
+    if "text_bytes" in df.columns:
+        print(f"- {out_dir / 'fig4_vazao.pdf'}")
+    if "filter_candidates" in df.columns:
+        print(f"- {out_dir / 'fig5_colisoes.pdf'}")
 
     imprimir_tabela(df)
 

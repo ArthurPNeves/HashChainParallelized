@@ -1,3 +1,13 @@
+# Artefatos de build
 main.exe
 main.obj
 .vs/
+*.exe
+*.obj
+
+# Corpus (baixar separadamente; ver README)
+bd/
+
+# Python
+__pycache__/
+*.pyc
